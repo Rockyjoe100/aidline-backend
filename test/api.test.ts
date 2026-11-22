@@ -23,6 +23,13 @@ const { app, db } = (await setupApp()) as { app: FastifyInstance; db: Db };
 const metadataHeaders = () => signRequest(uploaderKeypair, 'metadata:create');
 const proofVerifier = Keypair.random();
 
+const verifierApplication = (address: string) => ({
+  address,
+  orgName: 'Red Relief Network',
+  country: 'Nigeria',
+  description: 'Field verification partner for flood response in Kogi state.',
+});
+
 const metadata = {
   title: 'Clean water after flooding in Les Cayes',
   summary:
@@ -341,6 +348,61 @@ describe('API', () => {
     // What matters is the fields exist.
     expect(Object.keys(after)).toContain('latestLedger');
     expect(Object.keys(after)).toContain('lagLedgers');
+  });
+
+  it('reports an unknown verifier address as inactive with no name', async () => {
+    const address = account();
+    const res = await app.inject({ url: `/verifiers/${address}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ address, active: false, orgName: null });
+  });
+
+  it('keeps a valid application pending until the admin activates it on chain', async () => {
+    const address = account();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: verifierApplication(address),
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({ address, status: 'pending_review' });
+
+    const profile = (await app.inject({ url: `/verifiers/${address}` })).json();
+    expect(profile).toMatchObject({
+      address,
+      active: false,
+      orgName: 'Red Relief Network',
+      country: 'Nigeria',
+    });
+    expect(profile.appliedAt).not.toBeNull();
+  });
+
+  it('rejects an application with a short name and description', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: { ...verifierApplication(account()), orgName: 'R', description: 'Too short' },
+    });
+    expect(res.statusCode).toBe(400);
+    const paths = res.json().issues.map((i: { path: string }) => i.path);
+    expect(paths).toEqual(expect.arrayContaining(['orgName', 'description']));
+  });
+
+  it('marks an expired campaign as expired in the verifier campaign list', async () => {
+    const verifier = account();
+    const now = Math.floor(Date.now() / 1000);
+    const expired = chainCampaign({ id: 0n, verifier, deadline: BigInt(now - 60) });
+    const open = chainCampaign({ id: 1n, verifier, deadline: BigInt(now + 86400) });
+    await index(expired, [events.created(0n, expired.creator)]);
+    await index(open, [events.created(1n, open.creator)]);
+
+    const { items } = (await app.inject({ url: `/verifiers/${verifier}/campaigns` })).json();
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: '0', status: 'expired' }),
+        expect.objectContaining({ id: '1', status: 'active' }),
+      ]),
+    );
   });
 
   it('serves /openapi.json describing every route', async () => {
