@@ -405,6 +405,59 @@ describe('API', () => {
     );
   });
 
+  it('returns an empty history for a donor with no activity', async () => {
+    const donor = account();
+    const res = await app.inject({ url: `/donors/${donor}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      address: donor,
+      totalDonated: '0',
+      campaignsSupported: 0,
+      donations: [],
+      refunds: [],
+      pledges: [],
+    });
+  });
+
+  it('totals donations across campaigns and lists refunds', async () => {
+    const donor = account();
+    const first = chainCampaign({ id: 0n });
+    const second = chainCampaign({ id: 1n });
+    await index(first, [events.created(0n, first.creator), events.donated(0n, donor, 100n)]);
+    await index(second, [
+      events.created(1n, second.creator),
+      events.donated(1n, donor, 250n),
+      events.refunded(1n, donor, 40n),
+    ]);
+
+    const body = (await app.inject({ url: `/donors/${donor}` })).json();
+    expect(body).toMatchObject({ totalDonated: '350', campaignsSupported: 2 });
+    expect(body.donations).toHaveLength(2);
+    expect(body.refunds).toEqual([expect.objectContaining({ campaignId: '1', amount: '40' })]);
+  });
+
+  it('pages donations without changing the summary, and rejects a bad address', async () => {
+    const donor = account();
+    for (const id of [0n, 1n]) {
+      const campaign = chainCampaign({ id });
+      await index(campaign, [events.created(id, campaign.creator), events.donated(id, donor, 100n)]);
+    }
+
+    const first = (await app.inject({ url: `/donors/${donor}?limit=1&offset=0` })).json();
+    const second = (await app.inject({ url: `/donors/${donor}?limit=1&offset=1` })).json();
+    expect(first.donations).toHaveLength(1);
+    expect(second.donations).toHaveLength(1);
+    expect([first.donations[0].campaignId, second.donations[0].campaignId].sort()).toEqual([
+      '0',
+      '1',
+    ]);
+    expect(first.totalDonated).toBe('200');
+
+    const invalid = await app.inject({ url: '/donors/not-an-address' });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().issues).toEqual([expect.objectContaining({ path: 'address' })]);
+  });
+
   it('serves /openapi.json describing every route', async () => {
     const res = await app.inject({ url: '/openapi.json' });
     expect(res.statusCode).toBe(200);
