@@ -2,6 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { notFound, pagination } from '../lib/http.js';
+import { documentRoute } from '../lib/openapi.js';
+
+const campaignIdParam = z.object({ id: z.coerce.bigint() });
 
 const SORT_MAP = {
   newest: 'c.created_at DESC',
@@ -71,8 +74,8 @@ const CSV_HEADERS = [
 ].join(',');
 
 export async function campaignRoutes(app: FastifyInstance) {
-  app.get('/campaigns/:id/sponsor-pool', async (req, reply) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id/sponsor-pool', documentRoute({ tag: 'campaigns', params: campaignIdParam }), async (req, reply) => {
+    const { id } = campaignIdParam.parse(req.params);
     const campaignId = id.toString();
     const exists = await app.db.query('SELECT 1 FROM campaigns WHERE id = $1', [campaignId]);
     if (!exists.rowCount) return notFound(reply, 'campaign');
@@ -100,7 +103,7 @@ export async function campaignRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/campaigns', async (req) => {
+  app.get('/campaigns', documentRoute({ tag: 'campaigns', querystring: listQuery }), async (req) => {
     const q = listQuery.parse(req.query);
     const where: string[] = [];
     const params: unknown[] = [];
@@ -144,8 +147,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { items: rows.map(({ total: _t, ...r }) => r), total };
   });
 
-  app.get('/campaigns/:id', async (req, reply) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id', documentRoute({ tag: 'campaigns', params: campaignIdParam }), async (req, reply) => {
+    const { id } = campaignIdParam.parse(req.params);
     const { rows } = await app.db.query(
       `SELECT ${CAMPAIGN_COLUMNS}, m.description AS "metadataDescription"
        FROM campaigns c LEFT JOIN campaign_metadata m ON m.id = c.metadata_id
@@ -187,8 +190,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { ...campaign, milestones, emergencyAdvances: advances.rows };
   });
 
-  app.get('/campaigns/:id/donations', async (req, reply) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id/donations', documentRoute({ tag: 'campaigns', params: campaignIdParam, querystring: pagination }), async (req, reply) => {
+    const { id } = campaignIdParam.parse(req.params);
     const exists = await app.db.query('SELECT 1 FROM campaigns WHERE id = $1', [id.toString()]);
     if (!exists.rows[0]) return notFound(reply, 'campaign');
     const q = pagination.parse(req.query);
@@ -201,8 +204,8 @@ export async function campaignRoutes(app: FastifyInstance) {
     return { items: rows };
   });
 
-  app.get('/campaigns/:id/pledges', async (req) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id/pledges', documentRoute({ tag: 'campaigns', params: campaignIdParam, querystring: pagination }), async (req) => {
+    const { id } = campaignIdParam.parse(req.params);
     const q = pagination.parse(req.query);
     const { rows } = await app.db.query(
       `SELECT pledge_id AS "pledgeId", donor, pledged_amount AS "pledgedAmount", pulled_amount AS "pulledAmount", status, skipped_reason AS "skippedReason", updated_at AS "updatedAt" FROM pledges WHERE campaign_id=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3`,
@@ -224,8 +227,8 @@ export async function campaignRoutes(app: FastifyInstance) {
    *
    * Ordering: chronological (created_at ASC), with event_id as a tie-breaker.
    */
-  app.get('/campaigns/:id/export.csv', async (req, reply) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id/export.csv', documentRoute({ tag: 'campaigns', params: campaignIdParam }), async (req, reply) => {
+    const { id } = campaignIdParam.parse(req.params);
 
     // Verify the campaign exists.
     const exists = await app.db.query('SELECT 1 FROM campaigns WHERE id = $1', [id.toString()]);
@@ -308,8 +311,8 @@ export async function campaignRoutes(app: FastifyInstance) {
   });
 
   // #1: list refunds for a campaign, newest first
-  app.get('/campaigns/:id/refunds', async (req, reply) => {
-    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+  app.get('/campaigns/:id/refunds', documentRoute({ tag: 'campaigns', params: campaignIdParam, querystring: pagination }), async (req, reply) => {
+    const { id } = campaignIdParam.parse(req.params);
     const q = pagination.parse(req.query);
 
     // Verify campaign exists first

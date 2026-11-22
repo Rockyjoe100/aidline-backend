@@ -1,7 +1,11 @@
 import { Keypair } from '@stellar/stellar-sdk';
-import { describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import type { Db } from '../src/db/pool.js';
 import { notFound, pagination, stellarAddress } from '../src/lib/http.js';
+import { setupApp } from './helpers.js';
 
 describe('stellarAddress', () => {
   it('accepts a real account address', () => {
@@ -66,5 +70,55 @@ describe('notFound', () => {
     expect(code).toHaveBeenCalledWith(404);
     expect(send).toHaveBeenCalledWith({ error: 'not_found', message: 'campaign not found' });
     expect(result).toEqual({ error: 'not_found', message: 'campaign not found' });
+  });
+});
+
+describe('error handler', () => {
+  let app: FastifyInstance;
+  let db: Db;
+  const nested = z.object({ user: z.object({ profile: z.object({ name: z.string().min(2) }) }) });
+
+  beforeAll(async () => {
+    ({ app, db } = (await setupApp()) as { app: FastifyInstance; db: Db });
+
+    app.post('/test/nested', async (req) => nested.parse(req.body));
+    app.get('/test/client-error', async () => {
+      throw Object.assign(new Error('Campaign has already closed'), { statusCode: 409 });
+    });
+    app.get('/test/crash', async () => {
+      throw new Error('database password is hunter2');
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await db.end();
+  });
+
+  it('turns a nested zod error into a 400 with a dotted path', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test/nested',
+      payload: { user: { profile: { name: 'A' } } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'validation_error', message: 'Request is invalid' });
+    expect(res.json().issues).toEqual([expect.objectContaining({ path: 'user.profile.name' })]);
+  });
+
+  it('passes a 4xx status and its message through', async () => {
+    const res = await app.inject({ url: '/test/client-error' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({
+      error: 'request_error',
+      message: 'Campaign has already closed',
+    });
+  });
+
+  it('replies with a generic 500 and does not leak the thrown message', async () => {
+    const res = await app.inject({ url: '/test/crash' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ error: 'internal_error', message: 'Something went wrong' });
+    expect(res.body).not.toContain('hunter2');
   });
 });

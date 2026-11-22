@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
 
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -25,11 +27,16 @@ import { verifierRoutes } from './routes/verifiers.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { createStorage, type StorageDriver } from './storage/index.js';
 
+const gzipAsync = promisify(gzip);
+const COMPRESSIBLE_TYPES = /^(application\/json|application\/javascript|text\/)/;
+const MIN_COMPRESS_BYTES = 1024;
+
 declare module 'fastify' {
   interface FastifyInstance {
     db: Db;
     config: Config;
     cache: ResponseCache;
+    storage: StorageDriver;
   }
 }
 
@@ -44,6 +51,7 @@ export async function buildApp(
   app.decorate('db', db);
   app.decorate('config', config);
   app.decorate('cache', new ResponseCache());
+  app.decorate('storage', createStorage(config));
 
   // Hardening headers (nosniff, frame-ancestors via X-Frame-Options, referrer policy, HSTS).
   // The CSP is off because this is a JSON API plus the Swagger UI, which needs inline scripts.
@@ -140,12 +148,20 @@ export async function buildApp(
     done();
   });
 
-  // #140: every error body carries the id of the request that failed, the same value as the
-  // X-Request-Id header, so a user can quote it and a maintainer can find the log line.
-  app.addHook('preSerialization', async (req, reply, payload) => {
-    if (reply.statusCode < 400 || typeof payload !== 'object' || payload === null) return payload;
-    if (!('error' in payload) || 'requestId' in payload) return payload;
-    return { ...payload, requestId: req.id };
+  // #136: gzip text responses (JSON, CSV, HTML, JS) for clients that accept it. Uploaded
+  // images and PDFs are already compressed and are left alone, as are small bodies.
+  app.addHook('onSend', async (req, reply, payload) => {
+    const type = String(reply.getHeader('content-type') ?? '');
+    if (!COMPRESSIBLE_TYPES.test(type) || reply.hasHeader('content-encoding')) return payload;
+    const vary = reply.getHeader('vary');
+    reply.header('vary', vary ? `${vary}, Accept-Encoding` : 'Accept-Encoding');
+    if (!/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) return payload;
+    if (!(typeof payload === 'string' || Buffer.isBuffer(payload))) return payload;
+    if (Buffer.byteLength(payload) < MIN_COMPRESS_BYTES) return payload;
+    const body = await gzipAsync(payload);
+    reply.header('content-encoding', 'gzip');
+    reply.header('content-length', body.length);
+    return body;
   });
 
   if (config.METRICS_ENABLED) registerMetrics(app);
