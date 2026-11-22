@@ -448,17 +448,18 @@ describe('API', () => {
     const donor = account();
     for (const id of [0n, 1n]) {
       const campaign = chainCampaign({ id });
-      await index(campaign, [events.created(id, campaign.creator), events.donated(id, donor, 100n)]);
+      await index(campaign, [
+        events.created(id, campaign.creator),
+        events.donated(id, donor, 100n),
+      ]);
     }
 
     const first = (await app.inject({ url: `/donors/${donor}?limit=1&offset=0` })).json();
     const second = (await app.inject({ url: `/donors/${donor}?limit=1&offset=1` })).json();
     expect(first.donations).toHaveLength(1);
     expect(second.donations).toHaveLength(1);
-    expect([first.donations[0].campaignId, second.donations[0].campaignId].sort()).toEqual([
-      '0',
-      '1',
-    ]);
+    const ids = [first.donations[0].campaignId, second.donations[0].campaignId].sort();
+    expect(ids).toEqual(['0', '1']);
     expect(first.totalDonated).toBe('200');
 
     const invalid = await app.inject({ url: '/donors/not-an-address' });
@@ -479,15 +480,11 @@ describe('API', () => {
     const proofId = randomUUID();
     const proofNote = 'Water tanks delivered to 3 camps';
     const proofFile = `http://api.test/uploads/proofs/${proofId}/0.png`;
+    const files = JSON.stringify([{ name: 'tanks.png', type: 'image/png', url: proofFile }]);
     await db.query(
-      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files) VALUES ($1, $2, $3, $4, $5)`,
-      [
-        proofId,
-        '0',
-        0,
-        proofNote,
-        JSON.stringify([{ name: 'tanks.png', type: 'image/png', url: proofFile }]),
-      ],
+      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [proofId, '0', 0, proofNote, files],
     );
 
     const withProof = chainCampaign({ id: 0n, verifier, released: 300n, milestonesReleased: 1 });
