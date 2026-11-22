@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { CATEGORIES } from '../lib/categories.js';
 import { notFound, writeRateLimits } from '../lib/http.js';
 
 const body = z.object({
@@ -11,7 +12,7 @@ const body = z.object({
   description: z.string().trim().min(20).max(10_000),
   location: z.string().trim().min(2).max(120),
   organizer: z.string().trim().min(2).max(120).optional(),
-  category: z.string().trim().max(60).optional(),
+  category: z.enum(CATEGORIES).optional(),
   imageUrl: z.url().optional(),
 });
 
@@ -21,6 +22,9 @@ const body = z.object({
  * Records are immutable so the URI on chain always means the same thing.
  */
 export async function metadataRoutes(app: FastifyInstance) {
+  /** The fixed category list, so the frontend can build its picker from one source. */
+  app.get('/categories', async () => ({ items: CATEGORIES }));
+
   app.post('/metadata', { config: { rateLimit: writeRateLimits.metadata } }, async (req, reply) => {
     const m = body.parse(req.body);
     const id = randomUUID();

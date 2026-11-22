@@ -313,7 +313,7 @@ async function main() {
       location: c.location,
       organizer: c.organizer,
       description: [...c.story, DEMO_NOTE].join('\n\n'),
-      category: c.kind === 'Emergency' ? 'emergency' : 'climate',
+      category: c.kind === 'Emergency' ? 'shelter' : 'reforestation',
     });
     const id = (await invoke(
       creator,
