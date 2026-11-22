@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
 
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -24,6 +26,10 @@ import { releaseRoutes } from './routes/releases.js';
 import { verifierRoutes } from './routes/verifiers.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { createStorage, type StorageDriver } from './storage/index.js';
+
+const gzipAsync = promisify(gzip);
+const COMPRESSIBLE_TYPES = /^(application\/json|application\/javascript|text\/)/;
+const MIN_COMPRESS_BYTES = 1024;
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -132,6 +138,22 @@ export async function buildApp(
       reply.header('x-request-id', randomUUID());
     }
     done();
+  });
+
+  // #136: gzip text responses (JSON, CSV, HTML, JS) for clients that accept it. Uploaded
+  // images and PDFs are already compressed and are left alone, as are small bodies.
+  app.addHook('onSend', async (req, reply, payload) => {
+    const type = String(reply.getHeader('content-type') ?? '');
+    if (!COMPRESSIBLE_TYPES.test(type) || reply.hasHeader('content-encoding')) return payload;
+    const vary = reply.getHeader('vary');
+    reply.header('vary', vary ? `${vary}, Accept-Encoding` : 'Accept-Encoding');
+    if (!/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) return payload;
+    if (!(typeof payload === 'string' || Buffer.isBuffer(payload))) return payload;
+    if (Buffer.byteLength(payload) < MIN_COMPRESS_BYTES) return payload;
+    const body = await gzipAsync(payload);
+    reply.header('content-encoding', 'gzip');
+    reply.header('content-length', body.length);
+    return body;
   });
 
   if (config.METRICS_ENABLED) registerMetrics(app);
