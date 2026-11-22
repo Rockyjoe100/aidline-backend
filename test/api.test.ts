@@ -14,6 +14,8 @@ import {
   multipartBody,
   resetDb,
   setupApp,
+  signRequest,
+  uploaderKeypair,
 } from './helpers.js';
 
 const { app, db } = (await setupApp()) as { app: FastifyInstance; db: Db };
