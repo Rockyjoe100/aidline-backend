@@ -82,8 +82,8 @@ export async function recordEvent(client: PoolClient, ev: AidlineEvent): Promise
       // The campaign row is written by upsertCampaign. Pin its creation time
       // to this event in case it was first seen through a later event.
       await client.query(
-        'UPDATE campaigns SET created_ledger = $2, created_at = $3 WHERE id = $1',
-        [ev.campaignId.toString(), ev.ledger, ev.closedAt],
+        'UPDATE campaigns SET created_ledger = $2, created_at = $3, created_event_id = $4 WHERE id = $1',
+        [ev.campaignId.toString(), ev.ledger, ev.closedAt, ev.eventId],
       );
       return;
 

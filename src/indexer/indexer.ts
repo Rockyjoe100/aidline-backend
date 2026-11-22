@@ -50,6 +50,8 @@ export interface IndexerOptions {
   log: FastifyBaseLogger;
   /** Cleared after every successful write so cached reads never go stale. */
   cache?: { clear(): void };
+  /** Called with the events of each committed write, for live streaming. */
+  onCommit?: (events: AidlineEvent[]) => void;
 }
 
 /**
@@ -147,6 +149,7 @@ export class Indexer {
       res.events.length === PAGE_SIZE && lastEvent ? lastEvent.ledger : res.latestLedger;
 
     const client = await db.connect();
+    const recorded: AidlineEvent[] = [];
     try {
       await client.query('BEGIN');
       for (const ev of events) {
@@ -167,6 +170,7 @@ export class Indexer {
           }
         }
         await recordEvent(client, ev);
+        recorded.push(ev);
       }
       await client.query(
         `INSERT INTO indexer_state (id, cursor, last_ledger, latest_ledger, updated_at)
@@ -183,6 +187,7 @@ export class Indexer {
       client.release();
     }
 
+    this.publish(recorded);
     await this.retryPendingCampaigns();
 
     // A committed write makes cached aggregates stale, so drop them immediately.
@@ -366,16 +371,19 @@ export class Indexer {
           'SELECT payload FROM pending_campaign_events WHERE campaign_id = $1 ORDER BY created_at, event_id',
           [row.campaign_id],
         );
+        const replayed: AidlineEvent[] = [];
         for (const { payload } of pending.rows) {
           const ev = { ...payload, campaignId: id, closedAt: new Date(payload.closedAt) } as AidlineEvent;
           if ('amount' in ev) ev.amount = BigInt(ev.amount);
           if ('campaignId' in ev && ev.type === 'milestone_released') ev.amount = BigInt(ev.amount);
           await recordEvent(client, ev);
+          replayed.push(ev);
         }
         await client.query('DELETE FROM pending_campaign_events WHERE campaign_id = $1', [row.campaign_id]);
         await client.query('DELETE FROM campaign_refresh_queue WHERE campaign_id = $1', [row.campaign_id]);
         await client.query('COMMIT');
         this.warnedCampaigns.delete(row.campaign_id);
+        this.publish(replayed);
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -407,6 +415,16 @@ export class Indexer {
       }),
     );
     return results;
+  }
+
+  /** Hands committed events to the live stream. A failure here never stops indexing. */
+  private publish(events: AidlineEvent[]): void {
+    if (!events.length) return;
+    try {
+      this.opts.onCommit?.(events);
+    } catch (err) {
+      this.opts.log.error({ err }, 'failed to publish committed events');
+    }
   }
 
   private async startLedger(): Promise<{ ledger: number; source: 'configured' | 'default' | 'rpc_oldest' }> {
