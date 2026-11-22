@@ -316,4 +316,28 @@ export async function campaignRoutes(app: FastifyInstance) {
     );
     return { items: rows };
   });
+
+  // #141: payout history for one campaign on its own, without the rest of the milestones.
+  // Newest first. event_id breaks ties so paging stays stable when releases share a timestamp.
+  app.get('/campaigns/:id/releases', async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
+    const q = pagination.parse(req.query);
+
+    const exists = await app.db.query('SELECT 1 FROM campaigns WHERE id = $1', [id.toString()]);
+    if (!exists.rows[0]) return notFound(reply, 'campaign');
+
+    const { rows } = await app.db.query(
+      `SELECT r.index, r.amount, r.proof_uri AS "proofUri", r.tx_hash AS "txHash",
+              r.created_at AS "releasedAt",
+              CASE WHEN p.id IS NULL THEN NULL ELSE json_build_object(
+                'id', p.id, 'note', p.note, 'files', p.files) END AS proof
+       FROM milestone_releases r
+       LEFT JOIN proofs p ON p.id = r.proof_id
+       WHERE r.campaign_id = $1
+       ORDER BY r.created_at DESC, r.event_id DESC
+       LIMIT $2 OFFSET $3`,
+      [id.toString(), q.limit, q.offset],
+    );
+    return { items: rows };
+  });
 }

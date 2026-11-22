@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- `GET /campaigns/:id/releases`, the paged payout history of one campaign with proof, newest first (#141)
+- Error bodies include `requestId`, the same value as the `X-Request-Id` header, so a failed request can be traced from the body (#140)
 - `GET /campaigns/:id/refunds`, newest first (#1, @RaymondAbiola)
 - Full text search with `?q=` across title, summary, location and organiser (#2, #26, @RaymondAbiola, @adetomiwa21)
 - Indexer lag reported in `/health` (#3, @RaymondAbiola)

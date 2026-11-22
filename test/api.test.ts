@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import { Keypair } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
@@ -21,6 +21,9 @@ import {
 } from './helpers.js';
 
 const { app, db } = (await setupApp()) as { app: FastifyInstance; db: Db };
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string;
+};
 
 const metadataHeaders = () => signRequest(uploaderKeypair, 'metadata:create');
 const proofVerifier = Keypair.random();
@@ -213,6 +216,37 @@ describe('API', () => {
     expect(items).toEqual([expect.objectContaining({ address, orgName: 'Red Relief Network' })]);
   });
 
+  it('filters active verifiers by country, ignoring case', async () => {
+    const nigerian = account();
+    const kenyan = account();
+    for (const [address, country] of [
+      [nigerian, 'Nigeria'],
+      [kenyan, 'Kenya'],
+    ]) {
+      const apply = await app.inject({
+        method: 'POST',
+        url: '/verifiers/applications',
+        payload: {
+          address,
+          orgName: `Relief partner in ${country}`,
+          country,
+          description: 'Field verification partner for flood response.',
+        },
+      });
+      expect(apply.statusCode).toBe(201);
+    }
+    await index(chainCampaign(), [events.verifier(nigerian, true), events.verifier(kenyan, true)]);
+
+    const addressesFor = async (query: string) =>
+      (await app.inject({ url: `/verifiers${query}` }))
+        .json()
+        .items.map((v: { address: string }) => v.address);
+    expect(await addressesFor('')).toHaveLength(2);
+    expect(await addressesFor('?country=nigeria')).toEqual([nigerian]);
+    expect(await addressesFor('?country=NIGERIA')).toEqual([nigerian]);
+    expect(await addressesFor('?country=Ghana')).toEqual([]);
+  });
+
   it('lists campaigns for a verifier with milestone counts', async () => {
     const verifier = account();
     const other = account();
@@ -305,6 +339,52 @@ describe('API', () => {
     expect(missing.statusCode).toBe(404);
     const missingDonations = await app.inject({ url: '/campaigns/999/donations' });
     expect(missingDonations.statusCode).toBe(404);
+  });
+
+  it('lists the releases of one campaign with proof, newest first, paged', async () => {
+    const proofId = '5d0c2f7e-8a1b-4c3d-9e2f-6a7b8c9d0e1f';
+    await db.query(
+      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files)
+       VALUES ($1, 0, 0, 'Water tanks delivered', '[{"name":"tank.png","url":"http://api.test/uploads/proofs/x/tank.png"}]')`,
+      [proofId],
+    );
+    const campaign = chainCampaign({ raised: 1000n, released: 600n, milestonesReleased: 2 });
+    await index(campaign, [
+      events.created(0n, campaign.creator),
+      events.released(0n, 0, 300n, `http://api.test/proofs/${proofId}`),
+      events.released(0n, 1, 300n, 'ipfs://no-proof'),
+    ]);
+
+    const res = await app.inject({ url: '/campaigns/0/releases' });
+    expect(res.statusCode).toBe(200);
+    const { items } = res.json();
+    // Newest first: milestone 1 was released after milestone 0.
+    expect(items.map((r: { index: number }) => r.index)).toEqual([1, 0]);
+    expect(items[0]).toMatchObject({ index: 1, amount: '300', proof: null });
+    expect(items[1]).toMatchObject({
+      index: 0,
+      amount: '300',
+      proofUri: `http://api.test/proofs/${proofId}`,
+      proof: { id: proofId, note: 'Water tanks delivered' },
+    });
+
+    const page = await app.inject({ url: '/campaigns/0/releases?limit=1&offset=1' });
+    expect(page.statusCode).toBe(200);
+    expect(page.json().items).toEqual([expect.objectContaining({ index: 0 })]);
+  });
+
+  it('returns an empty list for a campaign with no releases yet', async () => {
+    const campaign = chainCampaign({ raised: 0n });
+    await index(campaign, [events.created(0n, campaign.creator)]);
+    const res = await app.inject({ url: '/campaigns/0/releases' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ items: [] });
+  });
+
+  it('returns 404 for releases of an unknown campaign', async () => {
+    const res = await app.inject({ url: '/campaigns/999/releases' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('not_found');
   });
 
   it('summarises platform stats', async () => {
@@ -540,6 +620,11 @@ describe('API', () => {
     expect(paths).toContain('/campaigns');
     expect(paths.some((p) => p.includes('/campaigns/{id}/refunds'))).toBe(true);
     expect(paths.some((p) => p.includes('/campaigns/{id}/donations'))).toBe(true);
+  });
+
+  it('reports the package.json version in /openapi.json', async () => {
+    const spec = (await app.inject({ url: '/openapi.json' })).json();
+    expect(spec.info.version).toBe(pkg.version);
   });
 
   it('serves /docs as HTML', async () => {

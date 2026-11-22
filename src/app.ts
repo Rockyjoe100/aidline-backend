@@ -43,12 +43,19 @@ declare module 'fastify' {
   }
 }
 
+/** Same file for `src/app.ts` and `dist/app.js`, so one level up is the package root. */
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string;
+};
+
 export async function buildApp(
   config: Config,
   db: Db,
   opts: FastifyServerOptions = { logger: true },
 ) {
-  const app = Fastify(opts);
+  // #140: the request id is generated here, never taken from the client, and the same value
+  // is sent in the X-Request-Id header and in every error body as `requestId`.
+  const app = Fastify({ genReqId: () => randomUUID(), requestIdHeader: false, ...opts });
   app.decorate('db', db);
   app.decorate('config', config);
   app.decorate('cache', new ResponseCache());
@@ -74,7 +81,7 @@ export async function buildApp(
         title: 'Aidline API',
         description:
           'API and Soroban event indexer for Aidline, transparent funding for disaster relief and climate action.',
-        version: '0.1.0',
+        version: pkg.version,
       },
       servers: [{ url: config.PUBLIC_BASE_URL }],
       tags: [
@@ -135,14 +142,18 @@ export async function buildApp(
   });
 
   // #10: consistent JSON 404 for unknown routes
-  app.setNotFoundHandler((_req, reply) => {
-    return reply.code(404).send({ error: 'not_found', message: 'Route not found' });
+  app.setNotFoundHandler((req, reply) => {
+    return reply.code(404).send({
+      error: 'not_found',
+      message: 'Route not found',
+      requestId: req.id,
+    });
   });
 
   // #11: attach a unique X-Request-Id header to every response
-  app.addHook('onSend', (_req, reply, _payload, done) => {
+  app.addHook('onSend', (req, reply, _payload, done) => {
     if (!reply.hasHeader('x-request-id')) {
-      reply.header('x-request-id', randomUUID());
+      reply.header('x-request-id', req.id);
     }
     done();
   });

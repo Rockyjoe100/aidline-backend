@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { CATEGORIES } from '../lib/categories.js';
 import { notFound, writeRateLimits } from '../lib/http.js';
+import { errorResponse } from '../lib/openapi.js';
 
 const body = z.object({
   title: z.string().trim().min(5).max(120),
@@ -32,19 +33,20 @@ export async function metadataRoutes(app: FastifyInstance) {
       `INSERT INTO campaign_metadata
          (id, title, summary, description, location, organizer, category, image_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        id,
-        m.title,
-        m.summary,
-        m.description,
-        m.location,
-        m.organizer ?? null,
-        m.category ?? null,
-        m.imageUrl ?? null,
-      ],
-    );
-    return reply.code(201).send({ id, uri: `${app.config.PUBLIC_BASE_URL}/metadata/${id}` });
-  });
+        [
+          id,
+          m.title,
+          m.summary,
+          m.description,
+          m.location,
+          m.organizer ?? null,
+          m.category ?? null,
+          m.imageUrl ?? null,
+        ],
+      );
+      return reply.code(201).send({ id, uri: `${app.config.PUBLIC_BASE_URL}/metadata/${id}` });
+    },
+  );
 
   app.get('/metadata/:id', async (req, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(req.params);

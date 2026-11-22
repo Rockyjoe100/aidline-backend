@@ -36,4 +36,30 @@ describe('decodeEvent', () => {
     raw.topic[0] = xdr.ScVal.scvSymbol('something_new');
     expect(decodeEvent(raw)).toBeNull();
   });
+
+  it('returns null for an unknown topic whatever its data holds', () => {
+    const raw = {
+      ...events.refunded(1n, account(), 5n),
+      topic: [xdr.ScVal.scvSymbol('something_new')],
+    };
+    expect(decodeEvent(raw)).toBeNull();
+  });
+
+  it('throws rather than inventing an amount when a refund has no amount', () => {
+    const raw = { ...events.refunded(1n, account(), 5n), value: xdr.ScVal.scvMap([]) };
+    expect(() => decodeEvent(raw)).toThrow(TypeError);
+  });
+
+  it('throws when a donation amount is text instead of an integer', () => {
+    const raw = { ...events.donated(1n, account(), 1n), value: xdr.ScVal.scvString('lots') };
+    expect(() => decodeEvent(raw)).toThrow(SyntaxError);
+  });
+
+  it('throws when a campaign id topic is not an integer', () => {
+    const raw = {
+      ...events.donated(1n, account(), 1n),
+      topic: [xdr.ScVal.scvSymbol('donated'), xdr.ScVal.scvSymbol('abc')],
+    };
+    expect(() => decodeEvent(raw)).toThrow(SyntaxError);
+  });
 });
