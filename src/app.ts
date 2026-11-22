@@ -36,6 +36,7 @@ declare module 'fastify' {
     db: Db;
     config: Config;
     cache: ResponseCache;
+    storage: StorageDriver;
   }
 }
 
