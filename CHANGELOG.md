@@ -22,9 +22,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - Tests for the config loader and request helpers, and `npm run test:coverage` with a minimum threshold enforced in CI
 - Per-route rate limits for `POST /metadata`, `POST /proofs` and `POST /verifiers/applications`, returning `429` with the standard error shape
 - Documented the API stability policy in `docs/API.md` and how to handle ephemeral proof storage in `docs/DEPLOYMENT.md`
+- `proofUri` column in the campaign CSV export, filled for milestone releases (#133)
+- `GET /donors/:address/export.csv` with a donor's donations and refunds (#134)
+- `GET /events`, a Server-Sent Events stream of donations, releases, refunds and campaign creations, with `Last-Event-ID` resume, heartbeats and a connection limit (#138)
+- Fixed campaign categories: `POST /metadata` accepts only the list returned by `GET /categories` (#139)
 
 ### Fixed
 
+- The indexer module and the proof upload route load again after a bad merge, and the test database reset truncates tables that reference each other
 - Proof files are stored with an extension taken from their validated type instead of the uploaded filename. Before, a file named `x.html` sent as `image/png` was served as HTML from the API's origin
 - Two parallel implementations of indexer recovery, stats history and search were merged into one each; a migration renumbered and duplicate tables dropped
 - Stats history dates no longer shift by a day outside UTC

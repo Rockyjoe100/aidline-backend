@@ -219,6 +219,7 @@ Returns a CSV file containing the complete financial activity for a campaign: do
 | `milestoneIndex` | Zero-based milestone index (releases only); empty for donations and refunds             |
 | `txHash`         | Transaction hash on the Stellar network                                                 |
 | `eventId`        | Soroban RPC event identifier (primary key of the history tables)                        |
+| `proofUri`       | URI of the proof attached to a release (releases only); empty for donations and refunds |
 
 **Ordering**: chronological by `createdAt` ascending, with `eventId` as the deterministic tie-breaker.
 
@@ -247,14 +248,14 @@ Cached in memory for 10 seconds per `limit`/`offset` pair, with the same `Cache-
 
 Create the story for a campaign before calling `create_campaign` on chain.
 
-| Field         | Rules                    |
-| ------------- | ------------------------ |
-| `title`       | 5 to 120 chars           |
-| `summary`     | 10 to 280 chars          |
-| `description` | 20 to 10,000 chars       |
-| `location`    | 2 to 120 chars           |
-| `category`    | optional, up to 60 chars |
-| `imageUrl`    | optional URL             |
+| Field         | Rules                                              |
+| ------------- | -------------------------------------------------- |
+| `title`       | 5 to 120 chars                                     |
+| `summary`     | 10 to 280 chars                                    |
+| `description` | 20 to 10,000 chars                                 |
+| `location`    | 2 to 120 chars                                     |
+| `category`    | optional, one of the values from `GET /categories` |
+| `imageUrl`    | optional URL                                       |
 
 Returns `201 { "id": "<uuid>", "uri": "http://.../metadata/<uuid>" }`. Pass `uri` as `metadata_uri` to the contract. Metadata is immutable.
 
@@ -283,6 +284,30 @@ nonce: <nonce>
 For proofs use `purpose: proof:upload` and an extra final line `campaign: <campaignId>`. `signRequest` in `src/lib/auth.ts` shows the canonical construction; the same function is used in the tests. A captured signature cannot be replayed (nonce) or reused on another route (purpose) or campaign (bound id). The frontend must add message signing to both upload flows.
 
 ### `GET /metadata/:id`
+
+### `GET /categories`
+
+The campaign categories accepted by `POST /metadata`, for building a picker in the frontend.
+
+```json
+{
+  "items": [
+    "flood",
+    "earthquake",
+    "storm",
+    "wildfire",
+    "drought",
+    "epidemic",
+    "food_security",
+    "shelter",
+    "reforestation",
+    "renewable_energy",
+    "other"
+  ]
+}
+```
+
+Metadata stored before the list existed may hold other free text. `GET /metadata/:id` returns those values unchanged.
 
 ## Proofs
 
@@ -345,6 +370,50 @@ Admin review queue: applications that are not yet active on chain. Requires the 
   "refunds": []
 }
 ```
+
+### `GET /donors/:address/export.csv`
+
+A CSV file of one donor's donations and refunds, oldest first. It uses the same quoting rules as the campaign export, so campaign titles containing commas or quotes stay in one cell.
+
+| Header                | Value                                        |
+| --------------------- | -------------------------------------------- |
+| `Content-Type`        | `text/csv; charset=utf-8`                    |
+| `Content-Disposition` | `attachment; filename="donor-<address>.csv"` |
+
+**CSV columns** (always in this order): `type`, `createdAt`, `campaignId`, `campaignTitle`, `amount`, `txHash`.
+
+`type` is `donation` or `refund`. `campaignTitle` is empty when the campaign has no metadata. A donor with no history gets the header row only.
+
+**Errors**: `400 validation_error` when the address is not a valid Stellar account.
+
+## Events
+
+### `GET /events`
+
+A [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html) stream of donations, milestone releases, refunds and campaign creations, sent as the indexer commits them.
+
+Query: `campaignId` (optional) limits the stream to one campaign.
+
+```
+id: 0000001234-0000000002
+event: donation
+data: {"campaignId":"0","actor":"G...","amount":"500","milestoneIndex":null,"txHash":"...","createdAt":"..."}
+```
+
+| Event              | `actor` | `amount` | `milestoneIndex` | `txHash` |
+| ------------------ | ------- | -------- | ---------------- | -------- |
+| `donation`         | donor   | yes      | `null`           | yes      |
+| `refund`           | donor   | yes      | `null`           | yes      |
+| `release`          | `null`  | yes      | index            | yes      |
+| `campaign_created` | `null`  | `null`   | `null`           | `null`   |
+
+**Resuming**: each message's `id` is the on-chain event id. A client that reconnects with the `Last-Event-ID` header first receives every matching event after that id, then live events. Browser `EventSource` does this automatically. Campaigns indexed before this feature shipped have no stored creation id, so their `campaign_created` events are not replayed.
+
+**Heartbeats**: an idle connection receives a `: heartbeat` comment line every `STREAM_HEARTBEAT_MS` (default 15 seconds). A `retry: 5000` line is sent on connect.
+
+**Limits**: at most `STREAM_MAX_CLIENTS` streams (default 100) are open at once. Above that the API answers `503` with `Retry-After: 5` and error `too_many_streams`. The stream closes cleanly when the server shuts down.
+
+**Scope**: the stream is served by the same process that runs the indexer. Events the indexer parks while waiting for a campaign read are sent when that campaign resolves, and remain available to resumed clients from the database.
 
 ## Webhooks
 
