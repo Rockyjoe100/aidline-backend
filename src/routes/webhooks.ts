@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { notFound } from '../lib/http.js';
+import { dateTime, errorResponse } from '../lib/openapi.js';
 
 /** Rejects URLs that would let a subscriber point a webhook at internal services. */
 function isPrivateHost(rawHost: string): boolean {
@@ -37,7 +38,40 @@ export async function webhookRoutes(app: FastifyInstance) {
 
   app.post(
     '/campaigns/:campaignId/webhooks',
-    { schema: { tags: ['webhooks'] } },
+    {
+      schema: {
+        tags: ['webhooks'],
+        summary: "Subscribe a URL to a campaign's milestone releases",
+        description:
+          'The URL receives a POST for each milestone released on this campaign. Each address may subscribe once per campaign.',
+        body: {
+          type: 'object',
+          required: ['url'],
+          properties: {
+            url: {
+              type: 'string',
+              format: 'uri',
+              description: 'http(s) URL without credentials or a private host',
+            },
+          },
+          example: { url: 'https://hooks.example.org/aidline/milestones' },
+        },
+        response: {
+          201: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              campaignId: { type: 'string' },
+              url: { type: 'string' },
+              createdAt: dateTime,
+            },
+          },
+          400: errorResponse('The URL is missing, malformed or not allowed'),
+          404: errorResponse('The campaign does not exist'),
+          409: errorResponse('This campaign already has a subscription for that URL'),
+        },
+      },
+    },
     async (req, reply) => {
       const { campaignId } = campaignParam.parse(req.params);
       const { url } = z.object({ url: webhookUrl }).parse(req.body);
@@ -72,14 +106,28 @@ export async function webhookRoutes(app: FastifyInstance) {
     return { items: rows };
   });
 
-  app.delete('/webhooks/:id', { schema: { tags: ['webhooks'] } }, async (req, reply) => {
-    const { id } = z.object({ id: z.uuid() }).parse(req.params);
-    const { rowCount } = await app.db.query('DELETE FROM webhook_subscriptions WHERE id = $1', [
-      id,
-    ]);
-    if (!rowCount) return notFound(reply, 'webhook subscription');
-    return reply.code(204).send();
-  });
+  app.delete(
+    '/webhooks/:id',
+    {
+      schema: {
+        tags: ['webhooks'],
+        summary: 'Delete a webhook subscription',
+        response: {
+          204: { type: 'null', description: 'The subscription was deleted' },
+          400: errorResponse('The id is not a UUID'),
+          404: errorResponse('The subscription does not exist'),
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(req.params);
+      const { rowCount } = await app.db.query('DELETE FROM webhook_subscriptions WHERE id = $1', [
+        id,
+      ]);
+      if (!rowCount) return notFound(reply, 'webhook subscription');
+      return reply.code(204).send();
+    },
+  );
 
   app.get('/webhooks/:id/deliveries', { schema: { tags: ['webhooks'] } }, async (req) => {
     const { id } = z.object({ id: z.uuid() }).parse(req.params);
