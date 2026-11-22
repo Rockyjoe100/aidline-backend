@@ -4,6 +4,42 @@ import { z } from 'zod';
 import { notFound, pagination } from '../lib/http.js';
 import { documentRoute } from '../lib/openapi.js';
 
+function toRelativePath(value: string): string | null {
+  if (!value) return null;
+  if (!/^https?:\/\//i.test(value)) return value.replace(/^\/+/, '');
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/\/uploads\/(.+)$/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeProofFiles<T>(proof: T, base: string): T {
+  if (!proof || typeof proof !== 'object') return proof;
+  const p = proof as Record<string, unknown>;
+  const files = p.files;
+  if (!Array.isArray(files)) return proof;
+  return {
+    ...p,
+    files: files.map((file) => {
+      if (!file || typeof file !== 'object') return file;
+      const f = file as Record<string, unknown>;
+      const url = typeof f.url === 'string' ? f.url : '';
+      const thumb = typeof f.thumbnailUrl === 'string' ? f.thumbnailUrl : '';
+      const key = toRelativePath(url);
+      const thumbKey = toRelativePath(thumb);
+      return {
+        ...f,
+        ...(key ? { url: `${base}/uploads/${key}` } : {}),
+        ...(thumbKey ? { thumbnailUrl: `${base}/uploads/${thumbKey}` } : {}),
+      };
+    }),
+  } as T;
+}
+
+
 const campaignIdParam = z.object({ id: z.coerce.bigint() });
 
 const SORT_MAP = {
@@ -167,6 +203,7 @@ export async function campaignRoutes(app: FastifyInstance) {
        WHERE r.campaign_id = $1`,
       [id.toString()],
     );
+    const base = app.config.PUBLIC_BASE_URL;
     const byIndex = new Map(releases.rows.map((r) => [r.index, r]));
     const milestones = (row.milestones as string[]).map((amount, index) => {
       const release = byIndex.get(index);
@@ -177,7 +214,7 @@ export async function campaignRoutes(app: FastifyInstance) {
         releasedAt: release?.releasedAt ?? null,
         txHash: release?.txHash ?? null,
         proofUri: release?.proofUri ?? null,
-        proof: release?.proof ?? null,
+        proof: release?.proof ? normalizeProofFiles(release.proof, base) : null,
       };
     });
 
@@ -351,6 +388,7 @@ export async function campaignRoutes(app: FastifyInstance) {
        LIMIT $2 OFFSET $3`,
       [id.toString(), q.limit, q.offset],
     );
-    return { items: rows };
+    const base = app.config.PUBLIC_BASE_URL;
+    return { items: rows.map((r) => ({ ...r, proof: r.proof ? normalizeProofFiles(r.proof, base) : null })) };
   });
 }

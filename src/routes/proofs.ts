@@ -1,9 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
-import { mkdir, stat, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -12,12 +8,6 @@ import { createThumbnail } from '../lib/images.js';
 import { notFound, writeRateLimits } from '../lib/http.js';
 import { detectMimeType, HEADER_BYTES } from '../lib/magic.js';
 
-/**
- * Allowed upload types and the file extension each is stored with. The extension comes from this
- * table, never from the uploaded filename: the static file server picks the response content type
- * from the extension, so a file named `x.html` sent as `image/png` would otherwise be served as
- * HTML from this origin.
- */
 const EXTENSIONS: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
@@ -26,17 +16,12 @@ const EXTENSIONS: Record<string, string> = {
 };
 const MAX_FILES = 5;
 
-const fields = z.object({
+const fieldsSchema = z.object({
   campaignId: z.coerce.bigint().nonnegative(),
   milestoneIndex: z.coerce.number().int().min(0),
   note: z.string().trim().min(10).max(2000),
 });
 
-/**
- * Reads just enough bytes to identify the file type. Iterating with
- * `destroyOnReturn: false` keeps the remaining stream readable after the
- * header, so the file can still be written in full.
- */
 async function readHeader(stream: Readable, size: number) {
   const chunks: Buffer[] = [];
   let bytesRead = 0;
@@ -47,11 +32,9 @@ async function readHeader(stream: Readable, size: number) {
     if (bytesRead >= size) break;
   }
   const collected = Buffer.concat(chunks);
-  // The whole collected buffer must be written back: the header is part of the file.
   return { header: collected.subarray(0, size), collected };
 }
 
-/** Replays the bytes already read for the header, then the rest of the stream. */
 async function* withPrefix(prefix: Buffer, stream: Readable): AsyncIterable<Buffer> {
   if (prefix.length) yield prefix;
   for await (const chunk of stream) {
@@ -59,90 +42,164 @@ async function* withPrefix(prefix: Buffer, stream: Readable): AsyncIterable<Buff
   }
 }
 
-/**
- * Verifiers upload evidence here before approving a milestone. The returned
- * URI is passed to `approve_milestone` and emitted on chain. Files go through
- * the configured storage driver; the original is always kept alongside an
- * optional smaller thumbnail for mobile clients.
- */
+async function readAll(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  }
+  return Buffer.concat(chunks);
+}
+
+type ProofFile = { name: string; url: string; size: number; type: string; thumbnailUrl?: string };
+
+function uploadsKey(id: string, name: string): string {
+  return `proofs/${id}/${name}`;
+}
+
+function fileUrl(base: string, key: string): string {
+  return `${base}/uploads/${key}`;
+}
+
+function toRelativePath(value: string): string | null {
+  if (!value) return null;
+  if (!/^https?:\/\//i.test(value)) return value.replace(/^\/+/, '');
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/\/uploads\/(.+)$/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFile(file: Record<string, unknown>, base: string): ProofFile {
+  const name = String(file.name ?? '');
+  const type = String(file.type ?? '');
+  const size = Number(file.size ?? 0);
+  const urlValue = typeof file.url === 'string' ? file.url : '';
+  const thumbValue = typeof file.thumbnailUrl === 'string' ? file.thumbnailUrl : '';
+  const key = toRelativePath(urlValue);
+  const thumbKey = toRelativePath(thumbValue);
+  return {
+    name,
+    type,
+    size,
+    url: key ? fileUrl(base, key) : urlValue,
+    ...(thumbKey ? { thumbnailUrl: fileUrl(base, thumbKey) } : {}),
+  };
+}
+
 export async function proofRoutes(app: FastifyInstance) {
   app.post('/proofs', { config: { rateLimit: writeRateLimits.proofs } }, async (req, reply) => {
     const id = randomUUID();
     const raw: Record<string, string> = {};
-    const files: { name: string; url: string; size: number; type: string }[] = [];
+    const files: ProofFile[] = [];
     const written: string[] = [];
-
-      try {
-        for await (const part of req.parts()) {
-          if (part.type === 'field') {
-            raw[part.fieldname] = String(part.value);
-            continue;
-          }
-          const extension = EXTENSIONS[part.mimetype];
-          if (!extension || files.length >= MAX_FILES) {
-            part.file.resume();
-            return reply.code(400).send({
-              error: 'invalid_file',
-              message: `Up to ${MAX_FILES} JPEG, PNG, WebP or PDF files are allowed`,
-            });
-          }
-
-          // The declared mimetype is untrusted. Check the real bytes before storing.
-          const { header, collected } = await readHeader(part.file, HEADER_BYTES);
-          if (detectMimeType(header) !== part.mimetype) {
-            part.file.resume();
-            return reply.code(400).send({
-              error: 'invalid_file',
-              message: 'File contents do not match the declared type',
-            });
-          }
-
-          await mkdir(dir, { recursive: true });
-          const name = `${files.length}${extension}`;
-          const path = join(dir, name);
-          written.push(path);
-          await pipeline(Readable.from(withPrefix(collected, part.file)), createWriteStream(path));
-          files.push({
-            name: part.filename,
-            type: part.mimetype,
-            url: `${app.config.PUBLIC_BASE_URL}/uploads/proofs/${id}/${name}`,
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'field') {
+          raw[part.fieldname] = String(part.value);
+          continue;
+        }
+        const extension = EXTENSIONS[part.mimetype];
+        if (!extension || files.length >= MAX_FILES) {
+          part.file.resume();
+          return reply.code(400).send({
+            error: 'invalid_file',
+            message: `Up to ${MAX_FILES} JPEG, PNG, WebP or PDF files are allowed`,
           });
         }
 
-        await mkdir(dir, { recursive: true });
+        const { header, collected } = await readHeader(part.file, HEADER_BYTES);
+        if (detectMimeType(header) !== part.mimetype) {
+          part.file.resume();
+          return reply.code(400).send({
+            error: 'invalid_file',
+            message: 'File contents do not match the declared type',
+          });
+        }
+
+        const body = await readAll(Readable.from(withPrefix(collected, part.file)));
         const name = `${files.length}${extension}`;
-        const path = join(dir, name);
-        written.push(path);
-        await pipeline(Readable.from(withPrefix(collected, part.file)), createWriteStream(path));
-        const { size } = await stat(path);
-        files.push({
+        const key = uploadsKey(id, name);
+        await app.storage.put(key, body, part.mimetype);
+        written.push(key);
+
+        const file: ProofFile = {
           name: part.filename,
           type: part.mimetype,
-          size,
-          url: `${app.config.PUBLIC_BASE_URL}/uploads/proofs/${id}/${name}`,
-        });
+          size: body.length,
+          url: key,
+        };
+
+        if (part.mimetype.startsWith('image/')) {
+          try {
+            const thumb = await createThumbnail(body);
+            if (thumb) {
+              const thumbName = `${files.length}.thumb.png`;
+              const thumbKey = uploadsKey(id, thumbName);
+              await app.storage.put(thumbKey, thumb, 'image/png');
+              written.push(thumbKey);
+              file.thumbnailUrl = thumbKey;
+            }
+          } catch {
+            // best effort
+          }
+        }
+
+        files.push(file);
       }
 
-      const f = fields.parse(raw);
-      if (f.campaignId.toString() !== campaignId) {
-        return reply
-          .code(201)
-          .send({ id, uri: `${app.config.PUBLIC_BASE_URL}/proofs/${id}`, files });
-      } finally {
-        // Anything still listed here belongs to a rejected upload.
-        await Promise.all(written.map((key) => app.storage.delete(key)));
+      const f = fieldsSchema.parse(raw);
+      if (files.length === 0) {
+        return reply.code(400).send({ error: 'invalid_file', message: 'At least one file is required' });
       }
-    },
-  );
+
+      await app.db.query(
+        `INSERT INTO proofs (id, campaign_id, milestone_index, note, files) VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [id, f.campaignId.toString(), f.milestoneIndex, f.note, JSON.stringify(files)],
+      );
+
+      const base = app.config.PUBLIC_BASE_URL;
+      return reply.code(201).send({
+        id,
+        uri: `${base}/proofs/${id}`,
+        files: files.map((file) => ({
+          ...file,
+          url: fileUrl(base, file.url),
+          ...(file.thumbnailUrl ? { thumbnailUrl: fileUrl(base, file.thumbnailUrl) } : {}),
+        })),
+      });
+    } catch (err) {
+      await Promise.all(written.map((key) => app.storage.delete(key).catch(() => {})));
+      throw err;
+    }
+  });
 
   app.get('/proofs/:id', async (req, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(req.params);
-    const { rows } = await app.db.query(
+    const { rows } = await app.db.query<{
+      id: string;
+      campaignId: string;
+      milestoneIndex: number;
+      note: string;
+      files: Record<string, unknown>[] | string;
+      createdAt: Date;
+    }>(
       `SELECT id, campaign_id AS "campaignId", milestone_index AS "milestoneIndex", note, files,
               created_at AS "createdAt"
        FROM proofs WHERE id = $1`,
       [id],
     );
-    return rows[0] ?? notFound(reply, 'proof');
+    const row = rows[0];
+    if (!row) return notFound(reply, 'proof');
+    const rawFiles = typeof row.files === 'string' ? JSON.parse(row.files) : row.files;
+    const base = app.config.PUBLIC_BASE_URL;
+    return {
+      ...row,
+      files: (Array.isArray(rawFiles) ? rawFiles : []).map((file) =>
+        normalizeFile(file as Record<string, unknown>, base),
+      ),
+    };
   });
 }
