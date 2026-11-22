@@ -1,6 +1,6 @@
 import { Keypair } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
@@ -48,6 +48,54 @@ describe('security headers', () => {
   it('still attaches a request id', async () => {
     const res = await app.inject({ url: '/stats' });
     expect(res.headers['x-request-id']).toBeTruthy();
+  });
+});
+
+describe('request ids in error responses', () => {
+  it('echoes the X-Request-Id header in a 400 body', async () => {
+    const res = await app.inject({ url: '/releases?limit=500' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'validation_error' });
+    expect(res.json().requestId).toBe(res.headers['x-request-id']);
+  });
+
+  it('echoes the X-Request-Id header in a 404 body', async () => {
+    const res = await app.inject({ url: '/campaigns/999999' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: 'not_found' });
+    expect(res.json().requestId).toBe(res.headers['x-request-id']);
+  });
+
+  it('echoes the X-Request-Id header in the 404 for an unknown route', async () => {
+    const res = await app.inject({ url: '/this/route/does/not/exist' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: 'not_found', message: 'Route not found' });
+    expect(res.json().requestId).toBe(res.headers['x-request-id']);
+  });
+
+  it('echoes the X-Request-Id header in a 500 body', async () => {
+    const spy = vi.spyOn(db, 'query').mockRejectedValueOnce(new Error('database is down'));
+    try {
+      const res = await app.inject({ url: '/releases' });
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({
+        error: 'internal_error',
+        message: 'Something went wrong',
+        requestId: res.headers['x-request-id'],
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('gives every request its own id, never one supplied by the client', async () => {
+    const first = await app.inject({
+      url: '/releases?limit=500',
+      headers: { 'request-id': 'mine' },
+    });
+    const second = await app.inject({ url: '/releases?limit=500' });
+    expect(first.headers['x-request-id']).not.toBe('mine');
+    expect(first.json().requestId).not.toBe(second.json().requestId);
   });
 });
 

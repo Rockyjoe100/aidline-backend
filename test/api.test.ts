@@ -341,6 +341,52 @@ describe('API', () => {
     expect(missingDonations.statusCode).toBe(404);
   });
 
+  it('lists the releases of one campaign with proof, newest first, paged', async () => {
+    const proofId = '5d0c2f7e-8a1b-4c3d-9e2f-6a7b8c9d0e1f';
+    await db.query(
+      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files)
+       VALUES ($1, 0, 0, 'Water tanks delivered', '[{"name":"tank.png","url":"http://api.test/uploads/proofs/x/tank.png"}]')`,
+      [proofId],
+    );
+    const campaign = chainCampaign({ raised: 1000n, released: 600n, milestonesReleased: 2 });
+    await index(campaign, [
+      events.created(0n, campaign.creator),
+      events.released(0n, 0, 300n, `http://api.test/proofs/${proofId}`),
+      events.released(0n, 1, 300n, 'ipfs://no-proof'),
+    ]);
+
+    const res = await app.inject({ url: '/campaigns/0/releases' });
+    expect(res.statusCode).toBe(200);
+    const { items } = res.json();
+    // Newest first: milestone 1 was released after milestone 0.
+    expect(items.map((r: { index: number }) => r.index)).toEqual([1, 0]);
+    expect(items[0]).toMatchObject({ index: 1, amount: '300', proof: null });
+    expect(items[1]).toMatchObject({
+      index: 0,
+      amount: '300',
+      proofUri: `http://api.test/proofs/${proofId}`,
+      proof: { id: proofId, note: 'Water tanks delivered' },
+    });
+
+    const page = await app.inject({ url: '/campaigns/0/releases?limit=1&offset=1' });
+    expect(page.statusCode).toBe(200);
+    expect(page.json().items).toEqual([expect.objectContaining({ index: 0 })]);
+  });
+
+  it('returns an empty list for a campaign with no releases yet', async () => {
+    const campaign = chainCampaign({ raised: 0n });
+    await index(campaign, [events.created(0n, campaign.creator)]);
+    const res = await app.inject({ url: '/campaigns/0/releases' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ items: [] });
+  });
+
+  it('returns 404 for releases of an unknown campaign', async () => {
+    const res = await app.inject({ url: '/campaigns/999/releases' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('not_found');
+  });
+
   it('summarises platform stats', async () => {
     const campaign = chainCampaign({ raised: 500n, released: 300n });
     await index(campaign, [
