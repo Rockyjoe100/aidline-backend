@@ -196,6 +196,32 @@ Query: `limit` (max 100, default 20), `offset`.
 | 404    | `not_found`        | Campaign id does not exist         |
 | 400    | `validation_error` | Campaign id is not a valid integer |
 
+### `GET /campaigns/:id/releases`
+
+The milestone payouts for one campaign, newest first, without the rest of the campaign. Use it when you only need the payout history, for example to page through it. Each item has `index`, `amount`, `releasedAt`, `txHash`, `proofUri` and `proof` (the same shape as the milestone timeline in `GET /campaigns/:id`, or `null` when no proof is linked).
+
+Query: `limit` (max 100, default 20), `offset`. Releases that share a timestamp are ordered by event id so pages never repeat or skip an item.
+
+```json
+{
+  "items": [
+    {
+      "index": 1,
+      "amount": "300",
+      "releasedAt": "2026-10-03T09:15:00.000Z",
+      "txHash": "9f2e...",
+      "proofUri": "http://.../proofs/<id>",
+      "proof": { "id": "...", "note": "Delivered 40 water tanks", "files": [] }
+    }
+  ]
+}
+```
+
+| Status | body `error`       | Condition                          |
+| ------ | ------------------ | ---------------------------------- |
+| 404    | `not_found`        | Campaign id does not exist         |
+| 400    | `validation_error` | Campaign id is not a valid integer |
+
 ### `GET /campaigns/:id/export.csv`
 
 Returns a CSV file containing the complete financial activity for a campaign: donations, milestone releases, and refunds.
@@ -401,7 +427,7 @@ Two other codes can appear but are not request mistakes you can fix by editing t
 - `request_error` with any other 4xx status is a generic client error (the `message` explains it), for example a malformed request body that is not valid JSON.
 - `internal_error` with status 500 means the server failed. The response message is deliberately generic; the cause is in the server logs. Retry with backoff and include the `X-Request-Id` response header when reporting it.
 
-All responses carry an `X-Request-Id` header. Include it with any bug report so a specific request can be traced in the logs.
+All responses carry an `X-Request-Id` header. Every error body also repeats that value as `requestId`, so you can read it from the body without inspecting headers. Include it with any bug report so a specific request can be traced in the logs.
 
 ## GET /campaigns/:id/sponsor-pool
 
