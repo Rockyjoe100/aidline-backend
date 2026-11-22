@@ -81,6 +81,7 @@ if (config.INDEXER_ENABLED && config.AIDLINE_CONTRACT_ID) {
     pollMs: config.INDEXER_POLL_MS,
     log: app.log.child({ module: 'indexer' }),
     cache: app.cache,
+    onCommit: (events) => app.streams.publish(events),
   });
   indexer.start();
 } else {

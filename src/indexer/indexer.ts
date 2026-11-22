@@ -7,6 +7,7 @@ import { decodeEvent, type AidlineEvent } from '../stellar/events.js';
 import { recordEvent, upsertCampaign } from './store.js';
 
 const PAGE_SIZE = 100;
+const CAMPAIGN_READ_CONCURRENCY = 5;
 const MAX_FAILURE_BACKOFF_MS = 120_000;
 
 /**
@@ -49,6 +50,8 @@ export interface IndexerOptions {
   log: FastifyBaseLogger;
   /** Cleared after every successful write so cached reads never go stale. */
   cache?: { clear(): void };
+  /** Called with the events of each committed write, for live streaming. */
+  onCommit?: (events: AidlineEvent[]) => void;
 }
 
 /**
@@ -70,6 +73,7 @@ export class Indexer {
   private inFlight: Promise<void> | null = null;
   private stopped = true;
   private consecutiveFailures = 0;
+  private readonly warnedCampaigns = new Set<string>();
 
   constructor(private readonly opts: IndexerOptions) {}
 
@@ -145,6 +149,7 @@ export class Indexer {
       res.events.length === PAGE_SIZE && lastEvent ? lastEvent.ledger : res.latestLedger;
 
     const client = await db.connect();
+    const recorded: AidlineEvent[] = [];
     try {
       await client.query('BEGIN');
       for (const ev of events) {
@@ -165,6 +170,7 @@ export class Indexer {
           }
         }
         await recordEvent(client, ev);
+        recorded.push(ev);
       }
       await client.query(
         `INSERT INTO indexer_state (id, cursor, last_ledger, latest_ledger, updated_at)
@@ -181,6 +187,7 @@ export class Indexer {
       client.release();
     }
 
+    this.publish(recorded);
     await this.retryPendingCampaigns();
 
     // A committed write makes cached aggregates stale, so drop them immediately.
@@ -330,6 +337,20 @@ export class Indexer {
       (entry): entry is readonly [bigint, Awaited<ReturnType<ContractReader['getCampaign']>>] =>
         entry !== null,
     );
+    return new Map(entries);
+  }
+
+  /**
+   * Retries campaigns whose contract state could not be read earlier. Their
+   * events were parked in pending_campaign_events and are applied once the
+   * campaign reads successfully.
+   */
+  private async retryPendingCampaigns(): Promise<void> {
+    const { rows } = await this.opts.db.query<{ campaign_id: string; warned: boolean }>(
+      `SELECT campaign_id, warned FROM campaign_refresh_queue
+       WHERE last_attempt_at IS NULL OR last_attempt_at < now() - interval '60 seconds'
+       ORDER BY campaign_id LIMIT 20`,
+    );
     const ids = rows.map((row) => BigInt(row.campaign_id));
     const found = await this.readCampaigns(ids);
     for (const row of rows) {
@@ -350,22 +371,59 @@ export class Indexer {
           'SELECT payload FROM pending_campaign_events WHERE campaign_id = $1 ORDER BY created_at, event_id',
           [row.campaign_id],
         );
+        const replayed: AidlineEvent[] = [];
         for (const { payload } of pending.rows) {
           const ev = { ...payload, campaignId: id, closedAt: new Date(payload.closedAt) } as AidlineEvent;
           if ('amount' in ev) ev.amount = BigInt(ev.amount);
           if ('campaignId' in ev && ev.type === 'milestone_released') ev.amount = BigInt(ev.amount);
           await recordEvent(client, ev);
+          replayed.push(ev);
         }
         await client.query('DELETE FROM pending_campaign_events WHERE campaign_id = $1', [row.campaign_id]);
         await client.query('DELETE FROM campaign_refresh_queue WHERE campaign_id = $1', [row.campaign_id]);
         await client.query('COMMIT');
         this.warnedCampaigns.delete(row.campaign_id);
+        this.publish(replayed);
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
       } finally {
         client.release();
       }
+    }
+  }
+
+  private async readCampaigns(ids: bigint[]) {
+    const results = new Map<bigint, Awaited<ReturnType<ContractReader['getCampaign']>>>();
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CAMPAIGN_READ_CONCURRENCY, ids.length) }, async () => {
+        while (next < ids.length) {
+          const id = ids[next++]!;
+          try {
+            results.set(id, await this.opts.contract.getCampaign(id));
+          } catch (err) {
+            if (!this.warnedCampaigns.has(id.toString())) {
+              this.opts.log.warn(
+                { err, campaignId: id.toString() },
+                'campaign read failed; queued for refresh',
+              );
+              this.warnedCampaigns.add(id.toString());
+            }
+          }
+        }
+      }),
+    );
+    return results;
+  }
+
+  /** Hands committed events to the live stream. A failure here never stops indexing. */
+  private publish(events: AidlineEvent[]): void {
+    if (!events.length) return;
+    try {
+      this.opts.onCommit?.(events);
+    } catch (err) {
+      this.opts.log.error({ err }, 'failed to publish committed events');
     }
   }
 

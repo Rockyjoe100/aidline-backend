@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { csvDocument, csvRow } from '../lib/csv.js';
 import { notFound, pagination } from '../lib/http.js';
 import { documentRoute } from '../lib/openapi.js';
 
@@ -41,27 +42,6 @@ const CAMPAIGN_COLUMNS = `
     'category', m.category, 'imageUrl', m.image_url
   ) END AS metadata`;
 
-/**
- * Escapes a single CSV cell value per RFC 4180:
- *  - If the value contains a comma, double-quote, newline or carriage-return,
- *    it is wrapped in double-quotes and any embedded double-quotes are doubled.
- *  - Empty/null values are emitted as an empty unquoted field.
- *
- * This implementation is intentionally small and has no external dependencies.
- */
-function csvCell(value: string | null | undefined): string {
-  if (value === null || value === undefined || value === '') return '';
-  const s = String(value);
-  if (/[,"\r\n]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
-function csvRow(cells: (string | null | undefined)[]): string {
-  return cells.map(csvCell).join(',');
-}
-
 const CSV_HEADERS = [
   'type',
   'createdAt',
@@ -71,6 +51,7 @@ const CSV_HEADERS = [
   'milestoneIndex',
   'txHash',
   'eventId',
+  'proofUri',
 ].join(',');
 
 export async function campaignRoutes(app: FastifyInstance) {
@@ -220,7 +201,8 @@ export async function campaignRoutes(app: FastifyInstance) {
    * Returns a CSV file containing all donations, milestone releases, and refunds
    * for the specified campaign, suitable for auditor review.
    *
-   * Columns: type, createdAt, campaignId, actor, amount, milestoneIndex, txHash, eventId
+   * Columns: type, createdAt, campaignId, actor, amount, milestoneIndex, txHash, eventId, proofUri
+   * proofUri is set for releases only and is empty for donations and refunds.
    *
    * Amounts are returned as-is from NUMERIC(39,0) columns, i.e., exact integer
    * strings in the token's smallest unit (stroops) with no floating-point conversion.
@@ -246,6 +228,7 @@ export async function campaignRoutes(app: FastifyInstance) {
       milestone_index: number | null;
       tx_hash: string;
       event_id: string;
+      proof_uri: string | null;
     }>(
       `SELECT 'donation'            AS type,
               created_at,
@@ -254,7 +237,8 @@ export async function campaignRoutes(app: FastifyInstance) {
               amount::text,
               NULL::integer          AS milestone_index,
               tx_hash,
-              event_id
+              event_id,
+              NULL::text             AS proof_uri
        FROM donations WHERE campaign_id = $1
 
        UNION ALL
@@ -266,7 +250,8 @@ export async function campaignRoutes(app: FastifyInstance) {
               amount::text,
               index                  AS milestone_index,
               tx_hash,
-              event_id
+              event_id,
+              proof_uri
        FROM milestone_releases WHERE campaign_id = $1
 
        UNION ALL
@@ -278,14 +263,15 @@ export async function campaignRoutes(app: FastifyInstance) {
               amount::text,
               NULL::integer          AS milestone_index,
               tx_hash,
-              event_id
+              event_id,
+              NULL::text             AS proof_uri
        FROM refunds WHERE campaign_id = $1
 
        ORDER BY created_at ASC, event_id ASC`,
       [id.toString()],
     );
 
-    const lines: string[] = [CSV_HEADERS];
+    const lines: string[] = [];
     for (const row of rows) {
       lines.push(
         csvRow([
@@ -297,11 +283,12 @@ export async function campaignRoutes(app: FastifyInstance) {
           row.milestone_index !== null ? String(row.milestone_index) : null,
           row.tx_hash,
           row.event_id,
+          row.proof_uri,
         ]),
       );
     }
 
-    const csv = lines.join('\r\n') + '\r\n';
+    const csv = csvDocument(CSV_HEADERS, lines);
 
     return reply
       .code(200)

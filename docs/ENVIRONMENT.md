@@ -71,6 +71,13 @@ Either driver serves files from `${PUBLIC_BASE_URL}/uploads/<key>`, so proof URI
 | `WEBHOOK_MAX_ATTEMPTS`       | `5`     | Attempts before a delivery is marked failed                       |
 | `WEBHOOK_ALLOW_PRIVATE_URLS` | `false` | Allow local/private receiver URLs. Only for development and tests |
 
+## Event stream
+
+| Variable              | Default | Notes                                                              |
+| --------------------- | ------- | ------------------------------------------------------------------ |
+| `STREAM_MAX_CLIENTS`  | `100`   | Open `GET /events` streams allowed at once. Extra requests get 503 |
+| `STREAM_HEARTBEAT_MS` | `15000` | Heartbeat interval on idle `GET /events` streams (minimum 1000)    |
+
 ## Why the `AIDLINE_` prefix
 
 The Stellar CLI reads `STELLAR_*` variables from `.env`. Sharing those names would make CLI commands run from this folder fail, so Aidline settings use their own prefix.
