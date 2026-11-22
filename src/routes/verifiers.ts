@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { stellarAddress, writeRateLimits } from '../lib/http.js';
+import { verifySignedRequest } from '../lib/auth.js';
+import { pagination, stellarAddress, writeRateLimits } from '../lib/http.js';
+import { amount, errorResponse, nullableDateTime, nullableString } from '../lib/openapi.js';
 
 const application = z.object({
   address: stellarAddress,
@@ -11,18 +13,70 @@ const application = z.object({
   description: z.string().trim().min(20).max(2000),
 });
 
+const verifierSummary = {
+  type: 'object',
+  properties: {
+    address: { type: 'string' },
+    orgName: nullableString,
+    website: nullableString,
+    country: nullableString,
+    description: nullableString,
+    bondAmount: amount,
+    everSlashed: { type: 'boolean' },
+    deregisteredAt: nullableDateTime,
+  },
+} as const;
+
 /**
  * Verifier profiles live here, but whether a verifier is active is decided
  * on chain by the admin. The indexer keeps `active` in sync.
  */
 export async function verifierRoutes(app: FastifyInstance) {
-  app.get('/verifiers', async () => {
-    const { rows } = await app.db.query(
-      `SELECT address, org_name AS "orgName", website, country, description, bond_amount AS "bondAmount", ever_slashed AS "everSlashed", deregistered_at AS "deregisteredAt"
-       FROM verifiers WHERE active ORDER BY org_name NULLS LAST, address`,
-    );
-    return { items: rows };
-  });
+  app.get(
+    '/verifiers',
+    {
+      schema: {
+        tags: ['verifiers'],
+        summary: 'List active verifiers',
+        querystring: {
+          type: 'object',
+          properties: {
+            country: {
+              type: 'string',
+              description: 'Only verifiers in this country. Matching ignores case.',
+            },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: verifierSummary },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { country } = z
+        .object({
+          country: z
+            .string()
+            .trim()
+            .optional()
+            .transform((v) => v || undefined),
+        })
+        .parse(req.query);
+      const { rows } = await app.db.query(
+        `SELECT address, org_name AS "orgName", website, country, description, bond_amount AS "bondAmount", ever_slashed AS "everSlashed", deregistered_at AS "deregisteredAt"
+         FROM verifiers
+         WHERE active AND ($1::text IS NULL OR lower(country) = lower($1))
+         ORDER BY org_name NULLS LAST, address`,
+        [country ?? null],
+      );
+      return { items: rows };
+    },
+  );
 
   /**
    * #21: the admin review queue. Applications stay here until the admin calls
@@ -71,7 +125,48 @@ export async function verifierRoutes(app: FastifyInstance) {
 
   app.post(
     '/verifiers/applications',
-    { config: { rateLimit: writeRateLimits.verifierApplications } },
+    {
+      config: { rateLimit: writeRateLimits.verifierApplications },
+      schema: {
+        tags: ['verifiers'],
+        summary: 'Apply to become a verifier',
+        description:
+          'Stores or updates an application for admin review. The verifier only becomes active when the admin adds it on chain. Resubmitting the same address replaces the stored profile.',
+        body: {
+          type: 'object',
+          required: ['address', 'orgName', 'country', 'description'],
+          properties: {
+            address: {
+              type: 'string',
+              pattern: '^G[A-Z2-7]{55}$',
+              description: 'Stellar account address',
+            },
+            orgName: { type: 'string', minLength: 2, maxLength: 120 },
+            website: { type: 'string', format: 'uri' },
+            country: { type: 'string', minLength: 2, maxLength: 60 },
+            description: { type: 'string', minLength: 20, maxLength: 2000 },
+          },
+          example: {
+            address: 'GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI',
+            orgName: 'Red Relief Network',
+            website: 'https://redrelief.example.org',
+            country: 'Nigeria',
+            description: 'Field verification partner for flood response in Kogi state.',
+          },
+        },
+        response: {
+          201: {
+            type: 'object',
+            properties: {
+              address: { type: 'string' },
+              status: { type: 'string', enum: ['pending_review'] },
+            },
+          },
+          400: errorResponse('The application is invalid'),
+          429: errorResponse('Too many applications from this client'),
+        },
+      },
+    },
     async (req, reply) => {
       const a = application.parse(req.body);
       await app.db.query(

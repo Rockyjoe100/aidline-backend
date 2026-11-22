@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { Keypair } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +19,9 @@ import {
 } from './helpers.js';
 
 const { app, db } = (await setupApp()) as { app: FastifyInstance; db: Db };
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string;
+};
 
 const metadataHeaders = () => signRequest(uploaderKeypair, 'metadata:create');
 const proofVerifier = Keypair.random();
@@ -196,6 +201,37 @@ describe('API', () => {
     expect(items).toEqual([expect.objectContaining({ address, orgName: 'Red Relief Network' })]);
   });
 
+  it('filters active verifiers by country, ignoring case', async () => {
+    const nigerian = account();
+    const kenyan = account();
+    for (const [address, country] of [
+      [nigerian, 'Nigeria'],
+      [kenyan, 'Kenya'],
+    ]) {
+      const apply = await app.inject({
+        method: 'POST',
+        url: '/verifiers/applications',
+        payload: {
+          address,
+          orgName: `Relief partner in ${country}`,
+          country,
+          description: 'Field verification partner for flood response.',
+        },
+      });
+      expect(apply.statusCode).toBe(201);
+    }
+    await index(chainCampaign(), [events.verifier(nigerian, true), events.verifier(kenyan, true)]);
+
+    const addressesFor = async (query: string) =>
+      (await app.inject({ url: `/verifiers${query}` }))
+        .json()
+        .items.map((v: { address: string }) => v.address);
+    expect(await addressesFor('')).toHaveLength(2);
+    expect(await addressesFor('?country=nigeria')).toEqual([nigerian]);
+    expect(await addressesFor('?country=NIGERIA')).toEqual([nigerian]);
+    expect(await addressesFor('?country=Ghana')).toEqual([]);
+  });
+
   it('lists campaigns for a verifier with milestone counts', async () => {
     const verifier = account();
     const other = account();
@@ -356,6 +392,11 @@ describe('API', () => {
     expect(paths).toContain('/campaigns');
     expect(paths.some((p) => p.includes('/campaigns/{id}/refunds'))).toBe(true);
     expect(paths.some((p) => p.includes('/campaigns/{id}/donations'))).toBe(true);
+  });
+
+  it('reports the package.json version in /openapi.json', async () => {
+    const spec = (await app.inject({ url: '/openapi.json' })).json();
+    expect(spec.info.version).toBe(pkg.version);
   });
 
   it('serves /docs as HTML', async () => {

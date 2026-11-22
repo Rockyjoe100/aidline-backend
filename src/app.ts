@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -33,6 +34,11 @@ declare module 'fastify' {
   }
 }
 
+/** Same file for `src/app.ts` and `dist/app.js`, so one level up is the package root. */
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string;
+};
+
 export async function buildApp(
   config: Config,
   db: Db,
@@ -42,6 +48,9 @@ export async function buildApp(
   app.decorate('db', db);
   app.decorate('config', config);
   app.decorate('cache', new ResponseCache());
+  // Routes validate input with zod. The JSON schemas on routes exist for the OpenAPI document
+  // and response serialization, so Fastify must not validate with them as well.
+  app.setValidatorCompiler(() => () => true);
 
   // Hardening headers (nosniff, frame-ancestors via X-Frame-Options, referrer policy, HSTS).
   // The CSP is off because this is a JSON API plus the Swagger UI, which needs inline scripts.
@@ -62,7 +71,7 @@ export async function buildApp(
         title: 'Aidline API',
         description:
           'API and Soroban event indexer for Aidline, transparent funding for disaster relief and climate action.',
-        version: '0.1.0',
+        version: pkg.version,
       },
       servers: [{ url: config.PUBLIC_BASE_URL }],
       tags: [
