@@ -7,6 +7,7 @@ import { decodeEvent, type AidlineEvent } from '../stellar/events.js';
 import { recordEvent, upsertCampaign } from './store.js';
 
 const PAGE_SIZE = 100;
+const CAMPAIGN_READ_CONCURRENCY = 5;
 const MAX_FAILURE_BACKOFF_MS = 120_000;
 
 /**
@@ -70,6 +71,7 @@ export class Indexer {
   private inFlight: Promise<void> | null = null;
   private stopped = true;
   private consecutiveFailures = 0;
+  private readonly warnedCampaigns = new Set<string>();
 
   constructor(private readonly opts: IndexerOptions) {}
 
@@ -330,6 +332,20 @@ export class Indexer {
       (entry): entry is readonly [bigint, Awaited<ReturnType<ContractReader['getCampaign']>>] =>
         entry !== null,
     );
+    return new Map(entries);
+  }
+
+  /**
+   * Retries campaigns whose contract state could not be read earlier. Their
+   * events were parked in pending_campaign_events and are applied once the
+   * campaign reads successfully.
+   */
+  private async retryPendingCampaigns(): Promise<void> {
+    const { rows } = await this.opts.db.query<{ campaign_id: string; warned: boolean }>(
+      `SELECT campaign_id, warned FROM campaign_refresh_queue
+       WHERE last_attempt_at IS NULL OR last_attempt_at < now() - interval '60 seconds'
+       ORDER BY campaign_id LIMIT 20`,
+    );
     const ids = rows.map((row) => BigInt(row.campaign_id));
     const found = await this.readCampaigns(ids);
     for (const row of rows) {
@@ -367,6 +383,30 @@ export class Indexer {
         client.release();
       }
     }
+  }
+
+  private async readCampaigns(ids: bigint[]) {
+    const results = new Map<bigint, Awaited<ReturnType<ContractReader['getCampaign']>>>();
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CAMPAIGN_READ_CONCURRENCY, ids.length) }, async () => {
+        while (next < ids.length) {
+          const id = ids[next++]!;
+          try {
+            results.set(id, await this.opts.contract.getCampaign(id));
+          } catch (err) {
+            if (!this.warnedCampaigns.has(id.toString())) {
+              this.opts.log.warn(
+                { err, campaignId: id.toString() },
+                'campaign read failed; queued for refresh',
+              );
+              this.warnedCampaigns.add(id.toString());
+            }
+          }
+        }
+      }),
+    );
+    return results;
   }
 
   private async startLedger(): Promise<{ ledger: number; source: 'configured' | 'default' | 'rpc_oldest' }> {

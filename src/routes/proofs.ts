@@ -9,7 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { createThumbnail } from '../lib/images.js';
-import { notFound } from '../lib/http.js';
+import { notFound, writeRateLimits } from '../lib/http.js';
 import { detectMimeType, HEADER_BYTES } from '../lib/magic.js';
 
 /**
