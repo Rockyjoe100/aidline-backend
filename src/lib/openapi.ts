@@ -1,44 +1,40 @@
+import { z } from 'zod';
+
 /**
- * Shared JSON schemas for the OpenAPI document. Requests are still validated by zod in each
- * route (see `setValidatorCompiler` in app.ts), so these schemas describe the API and shape
- * responses. They never reject a request on their own.
+ * Converts a zod schema to the JSON Schema that OpenAPI documents. Input shape, so fields with
+ * defaults are optional. Campaign ids are bigints in zod but digit strings on the wire.
  */
-
-/** Token amounts are NUMERIC columns, returned as decimal strings and never as JS numbers. */
-export const amount = {
-  type: 'string',
-  pattern: '^\\d+$',
-  description: 'Token amount in stroops, as a decimal string',
-} as const;
-
-export const nullableString = { type: ['string', 'null'] } as const;
-export const nullableInteger = { type: ['integer', 'null'] } as const;
-export const dateTime = { type: 'string', format: 'date-time' } as const;
-export const nullableDateTime = { type: ['string', 'null'], format: 'date-time' } as const;
-
-export const pagination = {
-  limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
-  offset: { type: 'integer', minimum: 0, default: 0 },
-} as const;
-
-/** Query string for every list route that accepts `limit` and `offset`. */
-export const paginationQuery = { type: 'object', properties: pagination } as const;
-
-/** Error envelope returned by the global error handler and by individual routes. */
-export const errorBody = {
-  type: 'object',
-  properties: {
-    error: { type: 'string', description: 'Machine readable error code' },
-    message: { type: 'string' },
-    issues: {
-      type: 'array',
-      description: 'Field level problems, present on validation errors',
-      items: {
-        type: 'object',
-        properties: { path: { type: 'string' }, message: { type: 'string' } },
-      },
+function jsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const json = z.toJSONSchema(schema, {
+    io: 'input',
+    unrepresentable: 'any',
+    override: ({ zodSchema, jsonSchema }) => {
+      if (zodSchema._zod.def.type === 'bigint') {
+        jsonSchema.type = 'string';
+        jsonSchema.pattern = '^\\d+$';
+      }
     },
-  },
-} as const;
+  });
+  delete json.$schema;
+  return json;
+}
 
-export const errorResponse = (description: string) => ({ ...errorBody, description }) as const;
+/**
+ * Route options that document path params and query string in OpenAPI. Fastify neither validates
+ * nor serializes with these schemas: the handlers keep parsing with zod, so responses and error
+ * bodies stay exactly as they were.
+ */
+export function documentRoute(options: {
+  tag: string;
+  params?: z.ZodType;
+  querystring?: z.ZodType;
+}) {
+  return {
+    schema: {
+      tags: [options.tag],
+      ...(options.params && { params: jsonSchema(options.params) }),
+      ...(options.querystring && { querystring: jsonSchema(options.querystring) }),
+    },
+    validatorCompiler: () => () => true,
+  };
+}

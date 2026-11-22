@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, unlink } from 'node:fs/promises';
+import { mkdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -10,7 +10,6 @@ import { z } from 'zod';
 
 import { createThumbnail } from '../lib/images.js';
 import { notFound, writeRateLimits } from '../lib/http.js';
-import { errorResponse } from '../lib/openapi.js';
 import { detectMimeType, HEADER_BYTES } from '../lib/magic.js';
 
 /**
@@ -67,73 +66,11 @@ async function* withPrefix(prefix: Buffer, stream: Readable): AsyncIterable<Buff
  * optional smaller thumbnail for mobile clients.
  */
 export async function proofRoutes(app: FastifyInstance) {
-  app.post(
-    '/proofs',
-    {
-      config: { rateLimit: writeRateLimits.proofs },
-      schema: {
-        tags: ['proofs'],
-        summary: 'Upload milestone evidence',
-        description: [
-          'Multipart upload of evidence for one milestone. The returned `uri` is passed to `approve_milestone`.',
-          `Limits: at most ${MAX_FILES} files per request, each at most 5 MB. Accepted types are JPEG, PNG, WebP and PDF, checked against the file contents, not the declared type.`,
-          '',
-          'Example:',
-          '```',
-          'curl -X POST https://api.example.org/proofs \\',
-          '  -F campaignId=0 -F milestoneIndex=0 \\',
-          '  -F "note=Photos of the clinic roof repaired after the distribution." \\',
-          '  -F "file=@clinic.jpg;type=image/jpeg"',
-          '```',
-        ].join('\n'),
-        consumes: ['multipart/form-data'],
-        body: {
-          type: 'object',
-          required: ['campaignId', 'milestoneIndex', 'note', 'file'],
-          properties: {
-            campaignId: { type: 'string', pattern: '^\\d+$', description: 'On chain campaign id' },
-            milestoneIndex: { type: 'integer', minimum: 0 },
-            note: { type: 'string', minLength: 10, maxLength: 2000 },
-            file: {
-              type: 'array',
-              minItems: 1,
-              maxItems: MAX_FILES,
-              description: 'One or more evidence files. Each part is at most 5 MB.',
-              items: { type: 'string', format: 'binary' },
-            },
-          },
-        },
-        response: {
-          201: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', format: 'uuid' },
-              uri: { type: 'string', format: 'uri' },
-              files: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    name: { type: 'string' },
-                    type: { type: 'string' },
-                    url: { type: 'string', format: 'uri' },
-                  },
-                },
-              },
-            },
-          },
-          400: errorResponse('A field is invalid, or a file is not an accepted type'),
-          403: errorResponse('The signed campaign id does not match the upload'),
-          413: errorResponse('A file is larger than 5 MB, or too many files were sent'),
-          429: errorResponse('Too many uploads from this client'),
-        },
-      },
-    },
-    async (req, reply) => {
-      const id = randomUUID();
-      const raw: Record<string, string> = {};
-      const files: { name: string; url: string; thumbnailUrl: string; type: string }[] = [];
-      const written: string[] = [];
+  app.post('/proofs', { config: { rateLimit: writeRateLimits.proofs } }, async (req, reply) => {
+    const id = randomUUID();
+    const raw: Record<string, string> = {};
+    const files: { name: string; url: string; size: number; type: string }[] = [];
+    const written: string[] = [];
 
       try {
         for await (const part of req.parts()) {
@@ -172,18 +109,22 @@ export async function proofRoutes(app: FastifyInstance) {
           });
         }
 
-        const f = fields.parse(raw);
-        if (f.campaignId.toString() !== campaignId) {
-          return reply
-            .code(403)
-            .send({ error: 'forbidden', message: 'Signed campaign id does not match the upload' });
-        }
-        await app.db.query(
-          `INSERT INTO proofs (id, campaign_id, milestone_index, note, files)
-         VALUES ($1, $2, $3, $4, $5)`,
-          [id, f.campaignId.toString(), f.milestoneIndex, f.note, JSON.stringify(files)],
-        );
-        written.length = 0;
+        await mkdir(dir, { recursive: true });
+        const name = `${files.length}${extension}`;
+        const path = join(dir, name);
+        written.push(path);
+        await pipeline(Readable.from(withPrefix(collected, part.file)), createWriteStream(path));
+        const { size } = await stat(path);
+        files.push({
+          name: part.filename,
+          type: part.mimetype,
+          size,
+          url: `${app.config.PUBLIC_BASE_URL}/uploads/proofs/${id}/${name}`,
+        });
+      }
+
+      const f = fields.parse(raw);
+      if (f.campaignId.toString() !== campaignId) {
         return reply
           .code(201)
           .send({ id, uri: `${app.config.PUBLIC_BASE_URL}/proofs/${id}`, files });

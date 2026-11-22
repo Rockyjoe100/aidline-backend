@@ -22,6 +22,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - Tests for the config loader and request helpers, and `npm run test:coverage` with a minimum threshold enforced in CI
 - Per-route rate limits for `POST /metadata`, `POST /proofs` and `POST /verifiers/applications`, returning `429` with the standard error shape
 - Documented the API stability policy in `docs/API.md` and how to handle ephemeral proof storage in `docs/DEPLOYMENT.md`
+- Campaign routes describe their path parameters and query strings in `/openapi.json` (#129)
+- A test fails when a route is added to or removed from the API without a matching entry in `docs/API.md` (#132)
+- Proof files report their `size` in bytes, so clients can show it before download (#135)
+- Text responses (JSON, CSV) are gzip compressed when the client sends `Accept-Encoding: gzip` (#136)
 
 ### Fixed
 
