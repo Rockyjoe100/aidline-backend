@@ -13,6 +13,7 @@ import Fastify, { type FastifyServerOptions } from 'fastify';
 import { ZodError } from 'zod';
 
 import { ResponseCache } from './lib/cache.js';
+import { EventStreamHub } from './lib/stream.js';
 import type { Config } from './config.js';
 import type { Db } from './db/pool.js';
 import { notFound } from './lib/http.js';
@@ -20,6 +21,7 @@ import { registerMetrics } from './metrics.js';
 import { alertRoutes } from './routes/alerts.js';
 import { campaignRoutes } from './routes/campaigns.js';
 import { donorRoutes } from './routes/donors.js';
+import { eventRoutes } from './routes/events.js';
 import { metaRoutes } from './routes/meta.js';
 import { metadataRoutes } from './routes/metadata.js';
 import { proofRoutes } from './routes/proofs.js';
@@ -37,6 +39,7 @@ declare module 'fastify' {
     db: Db;
     config: Config;
     cache: ResponseCache;
+    streams: EventStreamHub;
     storage: StorageDriver;
   }
 }
@@ -94,6 +97,7 @@ export async function buildApp(
         { name: 'donors', description: 'Donor profiles and donation history' },
         { name: 'alerts', description: 'Recent GDACS disaster alerts' },
         { name: 'webhooks', description: 'Milestone release webhook subscriptions' },
+        { name: 'events', description: 'Live stream of donations, releases, refunds and campaigns' },
       ],
     },
   });
@@ -184,6 +188,7 @@ export async function buildApp(
   await app.register(donorRoutes);
   await app.register(alertRoutes);
   await app.register(webhookRoutes);
+  await app.register(eventRoutes);
 
   return app;
 }

@@ -43,6 +43,10 @@ const schema = z.object({
   GDACS_FEED_URL: z.url().default('https://www.gdacs.org/xml/rss.xml'),
   GDACS_POLL_MS: z.coerce.number().int().min(60_000).default(300_000),
 
+  // Live event stream (GET /events). Heartbeats keep idle connections open through proxies.
+  STREAM_MAX_CLIENTS: z.coerce.number().int().min(1).default(100),
+  STREAM_HEARTBEAT_MS: z.coerce.number().int().min(1000).default(15_000),
+
   // Webhook delivery worker.
   WEBHOOK_POLL_MS: z.coerce.number().int().min(1000).default(5000),
   WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
