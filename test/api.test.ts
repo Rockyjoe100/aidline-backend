@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Keypair } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -14,12 +16,23 @@ import {
   multipartBody,
   resetDb,
   setupApp,
+  signRequest,
+  uploaderKeypair,
 } from './helpers.js';
 
 const { app, db } = (await setupApp()) as { app: FastifyInstance; db: Db };
 
 const metadataHeaders = () => signRequest(uploaderKeypair, 'metadata:create');
 const proofVerifier = Keypair.random();
+
+const verifierApplication = (address: string) => ({
+  address,
+  orgName: 'Red Relief Network',
+  country: 'Nigeria',
+  description: 'Field verification partner for flood response in Kogi state.',
+});
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const metadata = {
   title: 'Clean water after flooding in Les Cayes',
@@ -50,7 +63,11 @@ async function index(campaign: ChainCampaign, raw: ReturnType<typeof events.dona
 }
 
 describe('API', () => {
-  beforeEach(() => resetDb(db));
+  beforeEach(async () => {
+    await resetDb(db);
+    // /releases and /stats are cached for 10 seconds, so clear them between tests.
+    app.cache.clear();
+  });
   afterAll(async () => {
     await app.close();
     await db.end();
@@ -339,6 +356,173 @@ describe('API', () => {
     // What matters is the fields exist.
     expect(Object.keys(after)).toContain('latestLedger');
     expect(Object.keys(after)).toContain('lagLedgers');
+  });
+
+  it('reports an unknown verifier address as inactive with no name', async () => {
+    const address = account();
+    const res = await app.inject({ url: `/verifiers/${address}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ address, active: false, orgName: null });
+  });
+
+  it('keeps a valid application pending until the admin activates it on chain', async () => {
+    const address = account();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: verifierApplication(address),
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({ address, status: 'pending_review' });
+
+    const profile = (await app.inject({ url: `/verifiers/${address}` })).json();
+    expect(profile).toMatchObject({
+      address,
+      active: false,
+      orgName: 'Red Relief Network',
+      country: 'Nigeria',
+    });
+    expect(profile.appliedAt).not.toBeNull();
+  });
+
+  it('rejects an application with a short name and description', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: { ...verifierApplication(account()), orgName: 'R', description: 'Too short' },
+    });
+    expect(res.statusCode).toBe(400);
+    const paths = res.json().issues.map((i: { path: string }) => i.path);
+    expect(paths).toEqual(expect.arrayContaining(['orgName', 'description']));
+  });
+
+  it('marks an expired campaign as expired in the verifier campaign list', async () => {
+    const verifier = account();
+    const now = Math.floor(Date.now() / 1000);
+    const expired = chainCampaign({ id: 0n, verifier, deadline: BigInt(now - 60) });
+    const open = chainCampaign({ id: 1n, verifier, deadline: BigInt(now + 86400) });
+    await index(expired, [events.created(0n, expired.creator)]);
+    await index(open, [events.created(1n, open.creator)]);
+
+    const { items } = (await app.inject({ url: `/verifiers/${verifier}/campaigns` })).json();
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: '0', status: 'expired' }),
+        expect.objectContaining({ id: '1', status: 'active' }),
+      ]),
+    );
+  });
+
+  it('returns an empty history for a donor with no activity', async () => {
+    const donor = account();
+    const res = await app.inject({ url: `/donors/${donor}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      address: donor,
+      totalDonated: '0',
+      campaignsSupported: 0,
+      donations: [],
+      refunds: [],
+      pledges: [],
+    });
+  });
+
+  it('totals donations across campaigns and lists refunds', async () => {
+    const donor = account();
+    const first = chainCampaign({ id: 0n });
+    const second = chainCampaign({ id: 1n });
+    await index(first, [events.created(0n, first.creator), events.donated(0n, donor, 100n)]);
+    await index(second, [
+      events.created(1n, second.creator),
+      events.donated(1n, donor, 250n),
+      events.refunded(1n, donor, 40n),
+    ]);
+
+    const body = (await app.inject({ url: `/donors/${donor}` })).json();
+    expect(body).toMatchObject({ totalDonated: '350', campaignsSupported: 2 });
+    expect(body.donations).toHaveLength(2);
+    expect(body.refunds).toEqual([expect.objectContaining({ campaignId: '1', amount: '40' })]);
+  });
+
+  it('pages donations without changing the summary, and rejects a bad address', async () => {
+    const donor = account();
+    for (const id of [0n, 1n]) {
+      const campaign = chainCampaign({ id });
+      await index(campaign, [
+        events.created(id, campaign.creator),
+        events.donated(id, donor, 100n),
+      ]);
+    }
+
+    const first = (await app.inject({ url: `/donors/${donor}?limit=1&offset=0` })).json();
+    const second = (await app.inject({ url: `/donors/${donor}?limit=1&offset=1` })).json();
+    expect(first.donations).toHaveLength(1);
+    expect(second.donations).toHaveLength(1);
+    const ids = [first.donations[0].campaignId, second.donations[0].campaignId].sort();
+    expect(ids).toEqual(['0', '1']);
+    expect(first.totalDonated).toBe('200');
+
+    const invalid = await app.inject({ url: '/donors/not-an-address' });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().issues).toEqual([expect.objectContaining({ path: 'address' })]);
+  });
+
+  it('lists releases with proof and verifier name, newest first, and pages them', async () => {
+    const verifier = account();
+    const applied = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: verifierApplication(verifier),
+    });
+    expect(applied.statusCode).toBe(201);
+
+    // The proof must exist before the release is indexed, or the release is stored without it.
+    const proofId = randomUUID();
+    const proofNote = 'Water tanks delivered to 3 camps';
+    const proofFile = `http://api.test/uploads/proofs/${proofId}/0.png`;
+    const files = JSON.stringify([{ name: 'tanks.png', type: 'image/png', url: proofFile }]);
+    await db.query(
+      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [proofId, '0', 0, proofNote, files],
+    );
+
+    const withProof = chainCampaign({ id: 0n, verifier, released: 300n, milestonesReleased: 1 });
+    await index(withProof, [
+      events.created(0n, withProof.creator),
+      events.released(0n, 0, 300n, `http://api.test/proofs/${proofId}`),
+    ]);
+    // Keeps the second release strictly newer, so the newest-first order is deterministic.
+    await pause(5);
+    const withoutProof = chainCampaign({
+      id: 1n,
+      verifier,
+      milestones: [100n, 200n],
+      released: 100n,
+      milestonesReleased: 1,
+    });
+    await index(withoutProof, [
+      events.created(1n, withoutProof.creator),
+      events.released(1n, 0, 100n, 'ipfs://not-yet-uploaded'),
+    ]);
+
+    const all = (await app.inject({ url: '/releases?limit=10' })).json();
+    expect(all.items).toHaveLength(2);
+    expect(all.items[0]).toMatchObject({
+      campaignId: '1',
+      proof: null,
+      verifierName: 'Red Relief Network',
+    });
+    expect(all.items[1]).toMatchObject({
+      campaignId: '0',
+      index: 0,
+      amount: '300',
+      verifierName: 'Red Relief Network',
+      proof: { id: proofId, note: proofNote, files: [expect.objectContaining({ url: proofFile })] },
+    });
+
+    const page = (await app.inject({ url: '/releases?limit=1&offset=1' })).json();
+    expect(page.items).toEqual([expect.objectContaining({ campaignId: '0' })]);
   });
 
   it('serves /openapi.json describing every route', async () => {
