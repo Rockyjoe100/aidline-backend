@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Keypair } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -30,6 +32,8 @@ const verifierApplication = (address: string) => ({
   description: 'Field verification partner for flood response in Kogi state.',
 });
 
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const metadata = {
   title: 'Clean water after flooding in Les Cayes',
   summary:
@@ -59,7 +63,11 @@ async function index(campaign: ChainCampaign, raw: ReturnType<typeof events.dona
 }
 
 describe('API', () => {
-  beforeEach(() => resetDb(db));
+  beforeEach(async () => {
+    await resetDb(db);
+    // /releases and /stats are cached for 10 seconds, so clear them between tests.
+    app.cache.clear();
+  });
   afterAll(async () => {
     await app.close();
     await db.end();
@@ -456,6 +464,68 @@ describe('API', () => {
     const invalid = await app.inject({ url: '/donors/not-an-address' });
     expect(invalid.statusCode).toBe(400);
     expect(invalid.json().issues).toEqual([expect.objectContaining({ path: 'address' })]);
+  });
+
+  it('lists releases with proof and verifier name, newest first, and pages them', async () => {
+    const verifier = account();
+    const applied = await app.inject({
+      method: 'POST',
+      url: '/verifiers/applications',
+      payload: verifierApplication(verifier),
+    });
+    expect(applied.statusCode).toBe(201);
+
+    // The proof must exist before the release is indexed, or the release is stored without it.
+    const proofId = randomUUID();
+    const proofNote = 'Water tanks delivered to 3 camps';
+    const proofFile = `http://api.test/uploads/proofs/${proofId}/0.png`;
+    await db.query(
+      `INSERT INTO proofs (id, campaign_id, milestone_index, note, files) VALUES ($1, $2, $3, $4, $5)`,
+      [
+        proofId,
+        '0',
+        0,
+        proofNote,
+        JSON.stringify([{ name: 'tanks.png', type: 'image/png', url: proofFile }]),
+      ],
+    );
+
+    const withProof = chainCampaign({ id: 0n, verifier, released: 300n, milestonesReleased: 1 });
+    await index(withProof, [
+      events.created(0n, withProof.creator),
+      events.released(0n, 0, 300n, `http://api.test/proofs/${proofId}`),
+    ]);
+    // Keeps the second release strictly newer, so the newest-first order is deterministic.
+    await pause(5);
+    const withoutProof = chainCampaign({
+      id: 1n,
+      verifier,
+      milestones: [100n, 200n],
+      released: 100n,
+      milestonesReleased: 1,
+    });
+    await index(withoutProof, [
+      events.created(1n, withoutProof.creator),
+      events.released(1n, 0, 100n, 'ipfs://not-yet-uploaded'),
+    ]);
+
+    const all = (await app.inject({ url: '/releases?limit=10' })).json();
+    expect(all.items).toHaveLength(2);
+    expect(all.items[0]).toMatchObject({
+      campaignId: '1',
+      proof: null,
+      verifierName: 'Red Relief Network',
+    });
+    expect(all.items[1]).toMatchObject({
+      campaignId: '0',
+      index: 0,
+      amount: '300',
+      verifierName: 'Red Relief Network',
+      proof: { id: proofId, note: proofNote, files: [expect.objectContaining({ url: proofFile })] },
+    });
+
+    const page = (await app.inject({ url: '/releases?limit=1&offset=1' })).json();
+    expect(page.items).toEqual([expect.objectContaining({ campaignId: '0' })]);
   });
 
   it('serves /openapi.json describing every route', async () => {
