@@ -2,6 +2,8 @@
 
 Base URL in development: `http://localhost:4000`
 
+Responses are gzip compressed when the request sends `Accept-Encoding: gzip`, except small bodies and uploaded files.
+
 Token amounts are returned as **strings** in the token's smallest unit (stroops for XLM, 7 decimals), because they can exceed what a JavaScript number holds safely. Timestamps are ISO 8601.
 
 Errors share one shape:
@@ -162,7 +164,7 @@ The same fields, plus `metadata.description` and a milestone timeline:
     "index": 0, "amount": "1000000000", "released": true,
     "releasedAt": "...", "txHash": "4c5d...",
     "proofUri": "http://.../proofs/<id>",
-    "proof": { "id": "...", "note": "Delivered 40 water tanks", "files": [{ "name": "...", "type": "image/png", "url": "..." }] }
+    "proof": { "id": "...", "note": "Delivered 40 water tanks", "files": [{ "name": "...", "type": "image/png", "size": 204800, "url": "..." }] }
   },
   { "index": 1, "amount": "1500000000", "released": false, "releasedAt": null, "txHash": null, "proofUri": null, "proof": null }
 ]
@@ -171,6 +173,10 @@ The same fields, plus `metadata.description` and a milestone timeline:
 ### `GET /campaigns/:id/donations`
 
 Paginated `{ items: [{ donor, amount, txHash, createdAt }] }`, newest first.
+
+### `GET /campaigns/:id/pledges`
+
+Paginated `{ items: [{ pledgeId, donor, pledgedAmount, pulledAmount, status, skippedReason, updatedAt }] }`, most recently updated first. Query: `limit` (max 100, default 20), `offset`.
 
 ### `GET /campaigns/:id/refunds`
 
@@ -317,7 +323,7 @@ Metadata stored before the list existed may hold other free text. `GET /metadata
 
 The bytes of each file are checked against its declared type: a file whose contents are not a real JPEG, PNG, WebP or PDF is rejected with `400 { "error": "invalid_file" }`. The stored extension always comes from the detected type, never the uploaded filename.
 
-Returns `201 { "id", "uri", "files" }`. Pass `uri` as `proof_uri` to `approve_milestone`.
+Returns `201 { "id", "uri", "files" }`. Each file has `name`, `type`, `size` (bytes, so a client can show the size before download) and `url`. Pass `uri` as `proof_uri` to `approve_milestone`.
 
 | Status | body `error`   | Condition                                           |
 | ------ | -------------- | --------------------------------------------------- |
@@ -414,6 +420,11 @@ data: {"campaignId":"0","actor":"G...","amount":"500","milestoneIndex":null,"txH
 **Limits**: at most `STREAM_MAX_CLIENTS` streams (default 100) are open at once. Above that the API answers `503` with `Retry-After: 5` and error `too_many_streams`. The stream closes cleanly when the server shuts down.
 
 **Scope**: the stream is served by the same process that runs the indexer. Events the indexer parks while waiting for a campaign read are sent when that campaign resolves, and remain available to resumed clients from the database.
+## Alerts
+
+### `GET /alerts`
+
+Recent GDACS disaster alerts, newest first. Query: `severity` (`orange` | `red`), `limit` (max 100, default 20), `offset`. Returns `{ items }` with `id`, `eventType`, `severity`, `title`, `location`, `country`, `url`, `publishedAt` and `fetchedAt`.
 
 ## Webhooks
 

@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - `GET /donors/:address/export.csv` with a donor's donations and refunds (#134)
 - `GET /events`, a Server-Sent Events stream of donations, releases, refunds and campaign creations, with `Last-Event-ID` resume, heartbeats and a connection limit (#138)
 - Fixed campaign categories: `POST /metadata` accepts only the list returned by `GET /categories` (#139)
+- Campaign routes describe their path parameters and query strings in `/openapi.json` (#129)
+- A test fails when a route is added to or removed from the API without a matching entry in `docs/API.md` (#132)
+- Proof files report their `size` in bytes, so clients can show it before download (#135)
+- Text responses (JSON, CSV) are gzip compressed when the client sends `Accept-Encoding: gzip` (#136)
 
 ### Fixed
 

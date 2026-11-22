@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, unlink } from 'node:fs/promises';
+import { mkdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -69,7 +69,7 @@ export async function proofRoutes(app: FastifyInstance) {
   app.post('/proofs', { config: { rateLimit: writeRateLimits.proofs } }, async (req, reply) => {
     const id = randomUUID();
     const raw: Record<string, string> = {};
-    const files: { name: string; url: string; thumbnailUrl: string; type: string }[] = [];
+    const files: { name: string; url: string; size: number; type: string }[] = [];
     const written: string[] = [];
 
     try {
@@ -102,9 +102,11 @@ export async function proofRoutes(app: FastifyInstance) {
         const path = join(dir, name);
         written.push(path);
         await pipeline(Readable.from(withPrefix(collected, part.file)), createWriteStream(path));
+        const { size } = await stat(path);
         files.push({
           name: part.filename,
           type: part.mimetype,
+          size,
           url: `${app.config.PUBLIC_BASE_URL}/uploads/proofs/${id}/${name}`,
         });
       }
