@@ -54,7 +54,9 @@ describe('GET /campaigns/:id/export.csv', () => {
     await index(campaign, [events.created(0n, campaign.creator)]);
     const res = await app.inject({ url: '/campaigns/0/export.csv' });
     const firstLine = res.body.split('\r\n')[0];
-    expect(firstLine).toBe('type,createdAt,campaignId,actor,amount,milestoneIndex,txHash,eventId');
+    expect(firstLine).toBe(
+      'type,createdAt,campaignId,actor,amount,milestoneIndex,txHash,eventId,proofUri',
+    );
   });
 
   it('includes donations in the CSV', async () => {
@@ -77,6 +79,21 @@ describe('GET /campaigns/:id/export.csv', () => {
     expect(res.body).toContain('release');
     expect(res.body).toContain('300');
     expect(res.body).toContain('0'); // milestoneIndex
+  });
+
+  it('fills proofUri for releases only', async () => {
+    const campaign = chainCampaign({ raised: 300n, released: 300n, milestonesReleased: 1 });
+    await index(campaign, [
+      events.created(0n, campaign.creator),
+      events.donated(0n, account(), 300n),
+      events.released(0n, 0, 300n, 'ipfs://proof'),
+    ]);
+    const res = await app.inject({ url: '/campaigns/0/export.csv' });
+    const rows = res.body.split('\r\n').filter((l) => l.length > 0);
+    const donation = rows.find((l) => l.startsWith('donation,'))!;
+    const release = rows.find((l) => l.startsWith('release,'))!;
+    expect(donation.endsWith(',')).toBe(true);
+    expect(release.endsWith(',ipfs://proof')).toBe(true);
   });
 
   it('includes refunds in the CSV', async () => {
@@ -149,9 +166,9 @@ describe('GET /campaigns/:id/export.csv', () => {
     // Each data line must have exactly 7 commas (8 columns)
     for (const line of lines) {
       // Count unquoted commas vs total, simpler check: split by comma for header
-      if (line === 'type,createdAt,campaignId,actor,amount,milestoneIndex,txHash,eventId') continue;
+      if (line.startsWith('type,createdAt')) continue;
       const cols = line.split(',');
-      expect(cols.length).toBeGreaterThanOrEqual(8);
+      expect(cols.length).toBe(9);
     }
   });
 
