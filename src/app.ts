@@ -30,6 +30,7 @@ declare module 'fastify' {
     db: Db;
     config: Config;
     cache: ResponseCache;
+    storage: StorageDriver;
   }
 }
 
@@ -42,6 +43,7 @@ export async function buildApp(
   app.decorate('db', db);
   app.decorate('config', config);
   app.decorate('cache', new ResponseCache());
+  app.decorate('storage', createStorage(config));
 
   // Hardening headers (nosniff, frame-ancestors via X-Frame-Options, referrer policy, HSTS).
   // The CSP is off because this is a JSON API plus the Swagger UI, which needs inline scripts.
