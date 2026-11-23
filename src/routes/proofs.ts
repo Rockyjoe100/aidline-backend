@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Readable } from 'node:stream';
+import { Readable } from 'node:stream';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -7,12 +7,6 @@ import { z } from 'zod';
 import { notFound, writeRateLimits } from '../lib/http.js';
 import { detectMimeType, HEADER_BYTES } from '../lib/magic.js';
 
-/**
- * Allowed upload types and the file extension each is stored with. The extension comes from this
- * table, never from the uploaded filename: the static file server picks the response content type
- * from the extension, so a file named `x.html` sent as `image/png` would otherwise be served as
- * HTML from this origin.
- */
 const EXTENSIONS: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
@@ -21,7 +15,7 @@ const EXTENSIONS: Record<string, string> = {
 };
 const MAX_FILES = 5;
 
-const fields = z.object({
+const fieldsSchema = z.object({
   campaignId: z.coerce.bigint().nonnegative(),
   milestoneIndex: z.coerce.number().int().min(0),
   note: z.string().trim().min(10).max(2000),
@@ -49,6 +43,20 @@ export async function proofRoutes(app: FastifyInstance) {
     const files: { name: string; url: string; size: number; type: string }[] = [];
     // Keys written by this request. Whatever is still listed when it fails is removed.
     const written: string[] = [];
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'field') {
+          raw[part.fieldname] = String(part.value);
+          continue;
+        }
+        const extension = EXTENSIONS[part.mimetype];
+        if (!extension || files.length >= MAX_FILES) {
+          part.file.resume();
+          return reply.code(400).send({
+            error: 'invalid_file',
+            message: `Up to ${MAX_FILES} JPEG, PNG, WebP or PDF files are allowed`,
+          });
+        }
 
     try {
       for await (const part of req.parts()) {
@@ -102,12 +110,28 @@ export async function proofRoutes(app: FastifyInstance) {
 
   app.get('/proofs/:id', async (req, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(req.params);
-    const { rows } = await app.db.query(
+    const { rows } = await app.db.query<{
+      id: string;
+      campaignId: string;
+      milestoneIndex: number;
+      note: string;
+      files: Record<string, unknown>[] | string;
+      createdAt: Date;
+    }>(
       `SELECT id, campaign_id AS "campaignId", milestone_index AS "milestoneIndex", note, files,
               created_at AS "createdAt"
        FROM proofs WHERE id = $1`,
       [id],
     );
-    return rows[0] ?? notFound(reply, 'proof');
+    const row = rows[0];
+    if (!row) return notFound(reply, 'proof');
+    const rawFiles = typeof row.files === 'string' ? JSON.parse(row.files) : row.files;
+    const base = app.config.PUBLIC_BASE_URL;
+    return {
+      ...row,
+      files: (Array.isArray(rawFiles) ? rawFiles : []).map((file) =>
+        normalizeFile(file as Record<string, unknown>, base),
+      ),
+    };
   });
 }
